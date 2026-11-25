@@ -189,7 +189,17 @@ changed = np.abs(out - full["gem"]).max(-1) > 1e-3
 report("refract 2x red: only glass changes", out, out, info, extra_ok=0.02 < changed.mean() < 0.6,
        note=f"(glass {changed.mean() * 100:.0f}% of frame)")
 
-# 7. Identity at mix 0.
+# 7. Custom OBJ (a small faceted solid written here, quads and a negative index).
+obj = os.path.join(OUT, "test_shape.obj")
+with open(obj, "w") as f:
+    f.write("# test\nv 0 0 1.2\nv 1 0 0\nv 0 1 0\nv -1 0 0\nv 0 -1 0\nv 0 0 -0.8\n")
+    f.write("f 1 2 3\nf 1 3 4\nf 1 4 5\nf 1 5 2\nf 6 3 2\nf 6 4 3\nf 6 5 4\nf -1 2/1/1 5//1\n")
+ui = dict(BASE, shape=41, rotX=20, rotY=30, focus=0.05, fstop=5.6)
+ref = run_ref("obj", inp, W, H, ref_args(ui, S) + [f"obj={obj}", "smoothAngle=30"])
+out, info = run_host("obj", inp, W, H, ofx_args(ui, S) + [f"objFile:={obj}", "smoothAngle=30"])
+report("custom OBJ", out, ref, info, extra_ok=float(np.abs(out - rgba).max()) > 0.05)
+
+# 8. Identity at mix 0.
 out, info = run_host("identity", inp, W, H, ofx_args(dict(BASE, mix=0.0), S))
 report("mix 0 is identity", out, rgba, info, extra_ok=info.get("identity") == "Source")
 

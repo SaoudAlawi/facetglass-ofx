@@ -14,11 +14,11 @@ Owner: Saoud. He wants **top-notch quality** and will share it publicly. **Windo
 
 Done and verified:
 1. **3D core** (`src/core/fg3d_params.h`, `fg3d_core.h`): path tracer for a solid triangle-mesh glass object with a BVH. Aperture depth of field, continuous spectral dispersion, Fresnel + TIR with a bounce limit, bevelled-edge normals, rough reflections, up to 4 camera-facing area lights, off-screen world (spherical / mirror / repeat / clamp / black / transparent) from a mip pyramid with blur and feather, input colour-space decode/encode, adaptive sampling. Its own exp/log/sin/cos make **CPU and CUDA bit-identical**.
-2. **Host library** (`src/host/`): procedural shapes (`fg3d_scene.cpp`: faceted plate, wedge prism, radial prism, split/round diopter, geodesic sphere, gem, crystal cluster, box, pyramid, rod), smooth groups, bevel edge data, orientation fix, BVH, UI → params (`makeParams`, the only place for host-side conversions), CPU passes (`fg3d_cpu*.h`), CUDA passes (`fg3d_cuda.cu`).
+2. **Host library** (`src/host/`): 42 procedural shapes plus OBJ import in `fg3d_shapes.cpp` (building blocks: convex hull, polar/rect height-field plates, ring cuts, parametric surfaces), grouped Prisms & Filters / Lenses / Gems / Solids / Organic / Custom; smooth groups with an angle limit, bevel edge data, orientation fix, BVH (`fg3d_scene.cpp`), UI → params (`makeParams`, the only place for host-side conversions), CPU passes (`fg3d_cpu*.h`), CUDA passes (`fg3d_cuda.cu`). **Shape ids (`enum Shape`) and choice orders are stored in projects: from the first public release on, only append.**
 3. **OFX plugin** (`src/plugin/FacetGlassPlugin.cpp`, v1.1): groups Shape / Placement / Glass / Optics / Outside Frame / Lights / Motion / Look / Technical; optional Refract Source (General context); full-source RoI; scene cached per instance; **CUDA render on the host's stream** when offered, multithreaded CPU otherwise. Static MSVC + CUDA runtimes.
 4. **Tests**:
    - `fg3d_gpu_test`: CUDA vs CPU on 8 looks + negative stride + 2x refract source; must be exact (currently 0 difference). RTX 2080 Ti: 12–20x faster than CPU.
-   - `tests/compare_ofx.py`: the built bundle in the HostSupport test host (`tests/ofxhost/fg_ofxhost.cpp`) vs the standalone renderer (`fg3d_render`): 18 checks (8 looks, tiles, negative rowBytes, render scale 0.5, quality presets, wobble + lights, Refract Source, identity). All exact.
+   - `tests/compare_ofx.py`: the built bundle in the HostSupport test host (`tests/ofxhost/fg_ofxhost.cpp`) vs the standalone renderer (`fg3d_render`): 19 checks (8 looks, tiles, negative rowBytes, render scale 0.5, quality presets, wobble + lights, Refract Source, custom OBJ, identity). All exact. Text params are passed to the host as `name:=text`.
    - `fg3d_math_test`: accuracy of the portable maths.
    - `tests/fg3d_preview.py`: contact sheet of looks for eyeballing (`tests/out/fg3d/contact_sheet.png`).
 5. Legacy v1 (thin-glass) core `src/core/fg_core.h` + `tests/compare_core.py` + the Fuse in `reference/` remain as a reference only; the plugin no longer uses them.
@@ -49,7 +49,7 @@ Install (admin, ask Saoud first): `powershell -ExecutionPolicy Bypass -File tool
 2. **On-screen gizmo** (OFX overlay interact, see `Examples/Basic`): drag Center, rotate (tilt/turn/roll), depth, f-stop; drop to Draft while dragging.
 3. **Look polish** against the public demo: bevel quality, grain at Good quality (blue-noise / better sampling), split diopter behaviour, the "turned back" environment.
 4. **Presets** (our own names) and saved defaults; a global Final-quality switch.
-5. **OBJ import** (custom shapes, smoothing angle), **HDRI/EXR world**, more than 2 lights in the UI.
+5. **HDRI/EXR world**, more than 2 lights in the UI. (OBJ import is done; try it in Resolve with a Blender export.)
 6. **Recorded hand-held motion** (CSV pose import, loop/hold/ease).
 7. **OpenCL** (AMD/Intel on Windows) and **Metal** (macOS) backends through the same core; each must match the CPU exactly.
 8. **Release**: GitHub Actions (windows-latest with CUDA via Jimver/cuda-toolkit; macos-14 with Metal), installers (Inno Setup / pkg), docs, demo reel, changelog.
