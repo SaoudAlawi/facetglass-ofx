@@ -38,6 +38,14 @@ if(FG_BUILD_PLUGIN AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/plugin/FacetGlassP
   else()
     set(FG_ARCH Linux-x86-64)
   endif()
+  # The $<1:...> generator expression stops multi-config generators (Visual Studio)
+  # from appending a Release/ or Debug/ subfolder, which hosts would not find.
   set_target_properties(FacetGlass PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/FacetGlass.ofx.bundle/Contents/${FG_ARCH})
+    LIBRARY_OUTPUT_DIRECTORY $<1:${CMAKE_BINARY_DIR}/FacetGlass.ofx.bundle/Contents/${FG_ARCH}>)
+  if(MSVC)
+    target_compile_definitions(FacetGlass PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(FacetGlass PRIVATE /W3 /fp:precise)
+    # Static CRT: the plugin must load in any host without a VC++ redistributable.
+    set_target_properties(FacetGlass PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  endif()
 endif()

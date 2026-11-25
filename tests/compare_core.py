@@ -9,7 +9,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "reference", "kernel-harness"))
 import run  # test image, presets and Lua-equivalent param conversion
 
-harness, core = sys.argv[1], sys.argv[2]
+# Absolute paths: Windows CreateProcess won't resolve relative paths like build/Release/x.exe.
+harness, core = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
 out = os.path.join(HERE, "out"); os.makedirs(out, exist_ok=True)
 W, H = run.W, run.H
 img = run.test_image()
