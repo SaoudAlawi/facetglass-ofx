@@ -48,8 +48,8 @@ Host quirks learned in Resolve: never call `setPersistentMessage` / `clearPersis
 ## Next steps (in order)
 
 1. **Resolve test of v1.1** (CUDA mode): Edit, Color and Fusion pages; check every shape, the Refract Source input, proxy/half resolution, Deliver.
-2. **On-screen gizmo** (OFX overlay interact, see `Examples/Basic`): drag Center, rotate (tilt/turn/roll), depth, f-stop; drop to Draft while dragging.
-3. **Look polish** against the public demo: bevel quality, grain at Good quality (blue-noise / better sampling), split diopter behaviour, the "turned back" environment.
+2. **On-screen gizmo**: done (colour-coded handles, works in Resolve with Open FX Overlay on the Color/Edit page).
+3. **Look polish** against the public demo: bevel quality, split diopter behaviour, the "turned back" environment. (Grain: done, see fg3d_noise.py; next step would be a denoiser or more samples on GPU.)
 4. **Presets** (our own names) and saved defaults; a global Final-quality switch.
 5. **HDRI/EXR world**, more than 2 lights in the UI. (OBJ import is done; try it in Resolve with a Blender export.)
 6. **Recorded hand-held motion** (CSV pose import, loop/hold/ease).
@@ -63,9 +63,10 @@ Host quirks learned in Resolve: never call `setPersistentMessage` / `clearPersis
 - Aperture radius `0.3 * depth / fstop` (blur scales with the object, as in v1). `focusInv(f) = 1 + (1/depth - 1)(1 - f)^2` for Focus and Glass Focus.
 - **Glass Focus** is a deliberate non-physical control: paths that went through glass land shifted by the difference between the two focus distances for their aperture point, so a diopter region can hold its own focus.
 - **Diopter Power = magnification** through the lens centre (+P → 1 + 0.1P, −P → 1/(1 + 0.1P)); the lens curvature is solved for the current depth and scale, so lens meshes depend on Size and Depth (the plugin's scene cache keys on them only for lenses).
-- Reflection choice: probability `min(1, F * reflection)` (TIR always reflects); stochastic, unbiased for F.
+- Reflections: at outer (entering) surfaces the reflection is a weighted one-bounce environment lookup (`F * reflection`) and the path continues by refraction with throughput `1 - F`; TIR reflects deterministically; internal partial reflections are not traced. No random reflect/refract choice (it produced sparkle noise).
 - Dispersion: wavelength per sample (golden-ratio sequence over 400–700 nm), Cauchy-like IOR offset, per-channel normalised weights so white stays white.
-- Sampling: R2 sequence for pixel jitter and aperture with per-pixel offsets (progressive, so adaptive stopping is unbiased in coverage); stop when relative standard error of luminance < threshold.
+- Sampling: one 5-D Kronecker sequence (generalised golden ratio, alpha_k = phi5^-k) for pixel jitter, aperture (concentric disc mapping) and wavelength; per-pixel offsets from interleaved gradient noise so residual error is blue-ish. Adaptive stopping uses per-channel Welford error relative to sqrt(luminance), so dispersion colour noise keeps sampling.
+- Grain metric: `python tests/fg3d_noise.py build/Release/fg3d_render.exe <tag>` (RMS vs a 512-spp reference, crops in tests/out/noise). 2026-11-26: Good 0.042 -> 0.0245, Final 0.0105 -> 0.0050. Remaining grain is mostly depth of field through facets plus dispersion.
 - Kernel coding rules (GPU portability and bit-exactness): float only (`f` suffix), scalar maths and the fgv3/fgv4 structs, no recursion, no global/constant arrays (private arrays like the BVH stack are fine), no textures, no identifiers that are keywords somewhere (`in`, `sample`, `half`), no library exp/log/sin/cos (use the core's), and compile without FMA contraction (`--fmad=false`, MSVC `/fp:precise`).
 
 ## Craft Anything

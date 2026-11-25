@@ -440,6 +440,24 @@ FG_DEVICE fgv4 fg3d_escape(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* s
   return c;
 }
 
+/* Interleaved gradient noise: a per-pixel value whose error pattern between
+   neighbouring pixels is high-frequency (blue-ish), so leftover sampling noise
+   reads as fine, even grain rather than blotches. */
+FG_DEVICE float fg3d_ign(float x, float y)
+{
+  return fg3d_fract(52.9829189f * fg3d_fract(0.06711056f * x + 0.00583715f * y));
+}
+
+/* Highlight boost for light seen via the glass. */
+FG_DEVICE fgv4 fg3d_boost(FG_PRIV const FG3DParams* p, fgv4 c)
+{
+  float lum = 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+  float e = fg3d_clampf((lum - p->threshold) / FG_FMAX(0.25f * p->threshold, 0.05f), 0.0f, 1.0f);
+  float g = 1.0f + p->boost * e * e * (3.0f - 2.0f * e);
+  c.x *= g; c.y *= g; c.z *= g;
+  return c;
+}
+
 /* ------------------------------------------------------------------ shade */
 
 FG_DEVICE fgv4 fg3d_shade(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* src, FG_GLOBAL const float* gls,
@@ -458,25 +476,37 @@ FG_DEVICE fgv4 fg3d_shade(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* sr
   float eps = 2e-4f;               /* object-space ray offset */
 
   unsigned int pix = fg3d_hash((unsigned int)x * 1973u + (unsigned int)y * 9277u + (unsigned int)p->seed * 26699u);
-  /* Per-pixel Cranley-Patterson offsets for the progressive (R2 / golden) sequences. */
-  float o1 = fg3d_rand(pix ^ 0x68bc21ebu), o2 = fg3d_rand(pix ^ 0x02e5be93u);
-  float o3 = fg3d_rand(pix ^ 0x967a889bu), o4 = fg3d_rand(pix ^ 0x1b873593u);
-  float o5 = fg3d_rand(pix ^ 0xcc9e2d51u);
+  /* Per-pixel offsets for the progressive (R2 / golden) sequences, from
+     interleaved gradient noise so neighbouring pixels' errors cancel visually. */
+  float bx = (float)x + (float)(p->seed % 1000) * 7.0f, by = (float)y + (float)(p->seed % 1000) * 3.0f;
+  float o1 = fg3d_ign(bx, by), o2 = fg3d_ign(bx + 5.588238f, by + 5.588238f);
+  float o3 = fg3d_ign(bx + 11.176476f, by + 11.176476f), o4 = fg3d_ign(bx + 16.764714f, by + 16.764714f);
+  float o5 = fg3d_ign(bx + 22.352952f, by + 22.352952f);
 
   float accR = 0.0f, accG = 0.0f, accB = 0.0f, accA = 0.0f;
   float wR = 0.0f, wG = 0.0f, wB = 0.0f;
-  float mean = 0.0f, m2 = 0.0f;
+  /* Adaptive sampling statistics per channel (Welford), so colour noise from
+     dispersion keeps sampling even when the brightness has settled. */
+  float meanR = 0.0f, meanG = 0.0f, meanB = 0.0f, m2R = 0.0f, m2G = 0.0f, m2B = 0.0f;
   int minN = p->minSamples < 1 ? 1 : p->minSamples;
   int maxN = p->maxSamples < minN ? minN : p->maxSamples;
   int n = 0;
 
   for (int i = 0; i < maxN; i++) {
     float fi = (float)i;
-    /* Pixel jitter and aperture point (R2 sequence), wavelength (golden ratio). */
-    float jx = fg3d_fract(o1 + fi * 0.7548776662f) - 0.5f;
-    float jy = fg3d_fract(o2 + fi * 0.5698402910f) - 0.5f;
-    float ar = p->aperture * FG_SQRT(fg3d_fract(o3 + fi * 0.7548776662f));
-    float at = 6.2831853f * fg3d_fract(o4 + fi * 0.5698402910f);
+    /* One 5-D low-discrepancy (Kronecker / generalised golden ratio) sequence for
+       pixel jitter, aperture point and wavelength, so the dimensions are not
+       correlated with each other and every prefix is evenly spread (adaptive
+       stopping keeps good coverage). alpha_k = phi5^-k, phi5^6 = phi5 + 1. */
+    float jx = fg3d_fract(o1 + fi * 0.8812714616f) - 0.5f;
+    float jy = fg3d_fract(o2 + fi * 0.7766393385f) - 0.5f;
+    /* Concentric square-to-disc mapping keeps the aperture samples stratified. */
+    float su = 2.0f * fg3d_fract(o3 + fi * 0.6844320127f) - 1.0f;
+    float sv = 2.0f * fg3d_fract(o4 + fi * 0.6031704985f) - 1.0f;
+    float ar = 0.0f, at = 0.0f;
+    if (su * su > sv * sv) { ar = su; at = 0.7853981634f * (sv / su); }
+    else if (sv != 0.0f) { ar = sv; at = 1.5707963268f - 0.7853981634f * (su / sv); }
+    ar *= p->aperture;
     float sa = 0.0f, ca = 1.0f;
     fg3d_sincos(at, &sa, &ca);
     float ax = ar * ca, ay = ar * sa;
@@ -487,7 +517,7 @@ FG_DEVICE fgv4 fg3d_shade(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* sr
     float ior = p->ior;
     fgv3 sw = fgv(1.0f, 1.0f, 1.0f);
     if (p->spectral != 0) {
-      lam = 0.40f + 0.30f * fg3d_fract(o5 + fi * 0.6180339887f);
+      lam = 0.40f + 0.30f * fg3d_fract(o5 + fi * 0.5315564363f);
       ior += p->dispersion * 0.05f * (1.0f / (lam * lam) - 3.306f);
       sw = fg3d_spectral_weight(lam);
     }
@@ -499,6 +529,11 @@ FG_DEVICE fgv4 fg3d_shade(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* sr
     fgv3 d = fgv_norm(fgv(px * zf - ax, py * zf - ay, zf));
     int glass = 0;   /* entered the glass at least once */
     int inside = 0;
+    /* Outer reflections are added as weighted environment lookups instead of a
+       random reflect/refract choice (which made sparkle noise); the path itself
+       always continues by refraction, or total internal reflection. */
+    float thr = 1.0f;
+    fgv4 add = fgv4m(0.0f, 0.0f, 0.0f, 0.0f);
 
     for (int b = 0; b < p->maxBounces; b++) {
       /* Into object space. */
@@ -520,18 +555,29 @@ FG_DEVICE fgv4 fg3d_shade(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* sr
       float cost = 0.0f;
       float F = fg3d_fresnel(cosi, n1, n2, &cost);
       int tir = F >= 1.0f ? 1 : 0;
-      float pr = tir != 0 ? 1.0f : fg3d_clampf(F * p->reflect, 0.0f, 1.0f);
       fgv3 nd;
-      int refl = fg3d_rand(rs ^ (unsigned int)(b * 0x9E3779B9u + 17u)) < pr ? 1 : 0;
+      fgv3 hitW = fgv_add(fgv(p->objPos[0], p->objPos[1], p->objPos[2]), fgv_mul(fg3d_rot(p, hitO), s));
+      if (tir == 0 && entering != 0) {
+        float fr = fg3d_clampf(F * p->reflect, 0.0f, 1.0f);
+        if (fr > 0.0f) {
+          fgv3 rr = fgv_madd(rd, nn, 2.0f * cosi);
+          if (p->roughness > 0.0f) {
+            float r1 = fg3d_rand(rs ^ (unsigned int)(b * 0x85EBCA6Bu + 3u)) * 2.0f - 1.0f;
+            float r2 = fg3d_rand(rs ^ (unsigned int)(b * 0xC2B2AE35u + 5u)) * 2.0f - 1.0f;
+            float r3 = fg3d_rand(rs ^ (unsigned int)(b * 0x27D4EB2Fu + 7u)) * 2.0f - 1.0f;
+            fgv3 pd = fgv_norm(fgv_add(rr, fgv_mul(fgv(r1, r2, r3), p->roughness)));
+            if (fgv_dot(pd, gn) > 0.0f) rr = pd;
+          }
+          if (fgv_dot(rr, gn) <= 0.0f) rr = fgv_madd(rd, gn, -2.0f * fgv_dot(rd, gn));
+          fgv4 rc = fg3d_boost(p, fg3d_escape(p, src, gls, hitW, fg3d_rot(p, fgv_norm(rr)), 1, aspect, pixU, pixV));
+          float wgt = thr * fr;
+          add.x += rc.x * wgt; add.y += rc.y * wgt; add.z += rc.z * wgt; add.w += rc.w * wgt;
+          thr *= 1.0f - fr;
+        }
+      }
+      int refl = tir;
       if (refl != 0) {
         nd = fgv_madd(rd, nn, 2.0f * cosi);
-        if (p->roughness > 0.0f && tir == 0) {
-          float r1 = fg3d_rand(rs ^ (unsigned int)(b * 0x85EBCA6Bu + 3u)) * 2.0f - 1.0f;
-          float r2 = fg3d_rand(rs ^ (unsigned int)(b * 0xC2B2AE35u + 5u)) * 2.0f - 1.0f;
-          float r3 = fg3d_rand(rs ^ (unsigned int)(b * 0x27D4EB2Fu + 7u)) * 2.0f - 1.0f;
-          fgv3 pd = fgv_norm(fgv_add(nd, fgv_mul(fgv(r1, r2, r3), p->roughness)));
-          if (fgv_dot(pd, gn) > 0.0f) nd = pd;
-        }
         if (fgv_dot(nd, gn) <= 0.0f) nd = fgv_madd(rd, gn, -2.0f * fgv_dot(rd, gn));
       } else {
         float eta = n1 / n2;
@@ -546,9 +592,8 @@ FG_DEVICE fgv4 fg3d_shade(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* sr
         if (entering != 0) { inside = 1; glass = 1; } else inside = 0;
       }
       nd = fgv_norm(nd);
-      if (refl != 0 && inside == 0) glass = 1;   /* outer reflection also shows on the glass */
       /* Back to world space. */
-      o = fgv_add(fgv(p->objPos[0], p->objPos[1], p->objPos[2]), fgv_mul(fg3d_rot(p, hitO), s));
+      o = hitW;
       d = fg3d_rot(p, nd);
     }
 
@@ -567,12 +612,8 @@ FG_DEVICE fgv4 fg3d_shade(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* sr
       c = fg3d_escape(p, src, gls, o, d, glass, aspect, pixU, pixV);
     }
 
-    if (glass != 0) {
-      float lum = 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
-      float e = fg3d_clampf((lum - p->threshold) / FG_FMAX(0.25f * p->threshold, 0.05f), 0.0f, 1.0f);
-      float g = 1.0f + p->boost * e * e * (3.0f - 2.0f * e);
-      c.x *= g; c.y *= g; c.z *= g;
-    }
+    if (glass != 0) c = fg3d_boost(p, c);
+    c.x = c.x * thr + add.x; c.y = c.y * thr + add.y; c.z = c.z * thr + add.z; c.w = c.w * thr + add.w;
 
     accR += c.x * sw.x; wR += sw.x;
     accG += c.y * sw.y; wG += sw.y;
@@ -580,14 +621,20 @@ FG_DEVICE fgv4 fg3d_shade(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* sr
     accA += c.w;
     n = i + 1;
 
-    /* Adaptive sampling on luminance (Welford). */
-    float l = (c.x + c.y + c.z) * (1.0f / 3.0f);
-    float dl = l - mean;
-    mean += dl / (float)n;
-    m2 += dl * (l - mean);
+    /* Per-sample channel estimates: spectral weights divided by their average
+       over 400-700 nm, so each is an unbiased sample of the final channel. */
+    float vR = c.x, vG = c.y, vB = c.z;
+    if (p->spectral != 0) { vR *= sw.x * (1.0f / 0.4178f); vG *= sw.y * (1.0f / 0.3760f); vB *= sw.z * (1.0f / 0.2988f); }
+    float inv = 1.0f / (float)n;
+    float dR = vR - meanR; meanR += dR * inv; m2R += dR * (vR - meanR);
+    float dG = vG - meanG; meanG += dG * inv; m2G += dG * (vG - meanG);
+    float dB = vB - meanB; meanB += dB * inv; m2B += dB * (vB - meanB);
     if (n >= minN && n < maxN && (n & 3) == 0 && p->noiseThreshold > 0.0f) {
-      float se = FG_SQRT(m2 / ((float)n * (float)(n - 1)));
-      if (se / (FG_FABS(mean) + 0.05f) < p->noiseThreshold) break;
+      float k = 1.0f / ((float)n * (float)(n - 1));
+      float lum = FG_FMAX(0.0f, 0.2126f * meanR + 0.7152f * meanG + 0.0722f * meanB);
+      /* Error relative to the pixel's brightness, in a perceptual-ish (square-root) sense. */
+      float se = FG_SQRT(FG_FMAX(FG_FMAX(m2R, m2G), m2B) * k);
+      if (se / (FG_SQRT(lum) * 0.5f + 0.05f) < p->noiseThreshold * 2.0f) break;
     }
   }
 

@@ -44,7 +44,7 @@ BASE = dict(shape=15, facets=3, bothSides=0, prismAngle=6.0, clearCentre=0.4, po
             fstop=4.0, focus=1.0, glassFocus=1.0, world=0, worldBlur=4.0, feather=0.05, wobble=0.0,
             wobbleSpeed=1.0, boost=0.5, threshold=1.0, mix=1.0, colorSpace=0)
 SAMPLES = dict(minSamples=8, maxSamples=24, noise=0.03)
-QUALITY = {0: (4, 8, 0.05), 1: (12, 48, 0.03), 2: (48, 384, 0.008)}
+QUALITY = {0: (4, 8, 0.05), 1: (16, 64, 0.025), 2: (48, 384, 0.008)}
 
 LOOKS = {
     "gem": dict(rotX=-35, rotY=15, ior=2.0, focus=0.05, fstop=5.6),

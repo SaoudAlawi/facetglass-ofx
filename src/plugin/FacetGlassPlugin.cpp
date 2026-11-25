@@ -351,7 +351,7 @@ void FacetGlassPlugin::readUI(double t, fg3d::UIParams& ui)
     _interacting->getValue(dragging);
     switch (dragging ? (int)kQualityDraft : choiceAt(_quality, t)) {
     case kQualityDraft: ui.minSamples = 4; ui.maxSamples = 8; ui.noiseThreshold = 0.05; break;
-    case kQualityGood: ui.minSamples = 12; ui.maxSamples = 48; ui.noiseThreshold = 0.03; break;
+    case kQualityGood: ui.minSamples = 16; ui.maxSamples = 64; ui.noiseThreshold = 0.025; break;
     case kQualityFinal: ui.minSamples = 48; ui.maxSamples = 384; ui.noiseThreshold = 0.008; break;
     default:
         ui.minSamples = _minS->getValueAtTime(t);
