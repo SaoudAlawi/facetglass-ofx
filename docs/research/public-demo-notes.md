@@ -90,3 +90,26 @@ edges catching light) is what reads as "real glass".
 - Preview at 1080p on an M5 MacBook is interactive at a lower quality; high quality has
   a big performance impact during playback (00:56-01:13).
 - "It's not the fastest preview ever", so the final shot was rendered to check (14:04).
+
+## Shape library (second look, 2026-11-25)
+
+Sources: high-resolution cue frames of the same public video at 02:12-02:26 and
+06:01-06:02 (shape menus open), the NewsShooter article
+(https://www.newsshooter.com/2026/11/07/video-village-mirage-raytraced-glass-effects-plugin/:
+"a library of 35+ 3D glass shapes, many of which are similar to popular prism
+filters from the real world", custom objects can be imported, bevels on any shape),
+and public listings of real effect filters (Prism Lens FX product pages and
+retailers: kaleidoscope, split diopter, handheld ripple and split ripple, halo and
+split halo, ghost, phantom, split subtle kaleidoscope, radiant, starburst, dream).
+
+Kinds of shapes visible in the demo menus (described by type, not by their names):
+a honeycomb of hexagonal lenslets on a disc; a bent, stretched slab; concentric
+wave rings (small and large); a crystal lens; convex and concave cylinders;
+multi-image prisms (whole and half); a pyramid; a dual-focus double image; a
+kaleidoscope; water drops on glass; wobbly / wavy glass; a sphere; a "basic
+shapes" submenu with the Platonic solids (tetrahedron, cube, octahedron,
+dodecahedron, icosahedron) and geodesic spheres at subdivision levels 0-3; a
+"user imports" submenu (OBJ).
+
+FacetGlass covers these kinds with its own procedural generators and its own
+names (see `fg3d::shapeName`).
