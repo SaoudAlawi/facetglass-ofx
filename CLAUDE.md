@@ -43,6 +43,8 @@ Install (admin, ask Saoud first): `powershell -ExecutionPolicy Bypass -File tool
 
 **Run the GPU test and compare_ofx after any change to the core, the host library or the plugin.**
 
+Host quirks learned in Resolve: never call `setPersistentMessage` / `clearPersistentMessage` (or any optional suite) unguarded: the Support library throws when the host lacks the suite, and a throw inside render makes Resolve show the untouched source. Use `showMessage()`. The test host provides every suite, so it cannot catch this.
+
 ## Next steps (in order)
 
 1. **Resolve test of v1.1** (CUDA mode): Edit, Color and Fusion pages; check every shape, the Refract Source input, proxy/half resolution, Deliver.

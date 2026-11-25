@@ -15,6 +15,7 @@
 //              [--tiles <n>]                     render in an n x n grid of render windows
 //              [--time <t>]                      frame number (default 0)
 //              [--negstride]                     store images top-down (negative rowBytes)
+//              [--minimal-host]                  no message suite V2, like DaVinci Resolve
 //              [name=value | name=x,y ...]       parameter values by script name
 //              [name:=text]                      text parameter (e.g. a file path)
 //
@@ -39,6 +40,7 @@
 #include "ofxCore.h"
 #include "ofxImageEffect.h"
 #include "ofxPixels.h"
+#include "ofxMessage.h"
 
 // HostSupport headers depend on each other: keep this order (same as hostDemo).
 #include "ofxhBinary.h"
@@ -116,6 +118,7 @@ struct Options {
     int tiles = 1;
     double time = 0.0;
     bool negStride = false;
+    bool minimalHost = false;  // no message suite V2 (like DaVinci Resolve)
     std::vector<std::pair<std::string, std::vector<double>>> params;
     std::vector<std::pair<std::string, std::string>> strParams;  // name:=text
 };
@@ -381,6 +384,13 @@ public:
         _properties.setIntProperty(kOfxParamHostPropPageRowColumnCount, 0, 1);
     }
 
+    // --minimal-host: hide optional suites that some hosts (e.g. Resolve) lack.
+    const void* fetchSuite(const char* name, int version) override
+    {
+        if (g_opt.minimalHost && std::strcmp(name, kOfxMessageSuite) == 0 && version >= 2) return nullptr;
+        return OH::ImageEffect::Host::fetchSuite(name, version);
+    }
+
     OH::ImageEffect::Instance* newInstance(void*, OH::ImageEffect::ImageEffectPlugin* plugin,
                                            OH::ImageEffect::Descriptor& desc, const std::string& ctx) override
     {
@@ -505,6 +515,7 @@ static void parseArgs(int argc, char** argv)
         else if (a == "--tiles") { need(1); o.tiles = std::max(1, std::atoi(argv[++i])); }
         else if (a == "--time") { need(1); o.time = std::atof(argv[++i]); }
         else if (a == "--negstride") { o.negStride = true; }
+        else if (a == "--minimal-host") { o.minimalHost = true; }
         else if (a.find(":=") != std::string::npos) {
             const size_t eq = a.find(":=");
             o.strParams.emplace_back(a.substr(0, eq), a.substr(eq + 2));

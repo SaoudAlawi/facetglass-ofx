@@ -189,6 +189,17 @@ private:
     void readUI(double t, fg3d::UIParams& ui);
     std::shared_ptr<const fg3d::SceneBuffers> scene(const fg3d::UIParams& ui);
     void updateVisibility();
+    // Persistent messages need the host's message suite V2, which not every host
+    // (e.g. DaVinci Resolve) provides; the Support library throws when it is missing.
+    // A message must never break a render, so failures are ignored.
+    void showMessage(const std::string& text)
+    {
+        try {
+            if (text.empty()) clearPersistentMessage();
+            else setPersistentMessage(Message::eMessageError, "", text);
+        } catch (...) {
+        }
+    }
     bool refractConnected() const { return _refract && _refract->isConnected(); }
 
     Clip *_dst, *_src, *_refract;
@@ -373,8 +384,7 @@ std::shared_ptr<const fg3d::SceneBuffers> FacetGlassPlugin::scene(const fg3d::UI
         auto s = std::make_shared<fg3d::SceneBuffers>();
         std::string err;
         fg3d::buildScene(fg3d::makeShape(ui.shape, &err), (float)ui.bevelAngle, *s);
-        if (!err.empty()) setPersistentMessage(Message::eMessageWarning, "", "FacetGlass: " + err);
-        else clearPersistentMessage();
+        showMessage(err.empty() ? std::string() : "FacetGlass: " + err);
         _scene = s;
         _sceneKey = ui.shape;
         _sceneBevel = (float)ui.bevelAngle;
@@ -458,7 +468,7 @@ void FacetGlassPlugin::render(const RenderArguments& args)
         f.winX1 = args.renderWindow.x1; f.winY1 = args.renderWindow.y1;
         f.winX2 = args.renderWindow.x2; f.winY2 = args.renderWindow.y2;
         if (const char* err = fg3d::renderCUDA(f, p, *sc)) {
-            setPersistentMessage(Message::eMessageError, "", std::string("FacetGlass CUDA: ") + err);
+            showMessage(std::string("FacetGlass CUDA: ") + err);
             throwSuiteStatusException(kOfxStatFailed);
         }
         return;

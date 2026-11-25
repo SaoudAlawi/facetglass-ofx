@@ -199,7 +199,12 @@ ref = run_ref("obj", inp, W, H, ref_args(ui, S) + [f"obj={obj}", "smoothAngle=30
 out, info = run_host("obj", inp, W, H, ofx_args(ui, S) + [f"objFile:={obj}", "smoothAngle=30"])
 report("custom OBJ", out, ref, info, extra_ok=float(np.abs(out - rgba).max()) > 0.05)
 
-# 8. Identity at mix 0.
+# 8. A host without the message suite V2 (like Resolve) must still render.
+ui = dict(BASE, **LOOKS["gem"])
+out, info = run_host("minimal_host", inp, W, H, ofx_args(ui, S), ["--minimal-host"])
+report("host without message suite", out, full["gem"], info)
+
+# 9. Identity at mix 0.
 out, info = run_host("identity", inp, W, H, ofx_args(dict(BASE, mix=0.0), S))
 report("mix 0 is identity", out, rgba, info, extra_ok=info.get("identity") == "Source")
 
