@@ -14,7 +14,20 @@
 #include <memory>
 #include <mutex>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+#ifdef __APPLE__
+#include <OpenGL/gl.h>
+#else
+#include <GL/gl.h>
+#endif
+
 #include "ofxsImageEffect.h"
+#include "ofxsInteract.h"
 #include "ofxsMultiThread.h"
 #include "ofxsProcessing.h"
 
@@ -76,6 +89,7 @@
 #define P_MINS "minSamples"
 #define P_MAXS "maxSamples"
 #define P_NOISE "noiseThreshold"
+#define P_INTERACT "interacting"
 #define kNumLights 2
 static const char* kLightPos[kNumLights] = { "light1Position", "light2Position" };
 static const char* kLightDepth[kNumLights] = { "light1Depth", "light2Depth" };
@@ -182,7 +196,7 @@ private:
     ChoiceParam *_shape, *_world, *_cspace, *_quality;
     IntParam *_facets, *_detail, *_seed, *_bounces, *_minS, *_maxS;
     StringParam* _obj;
-    BooleanParam* _both;
+    BooleanParam *_both, *_interacting;
     DoubleParam *_prism, *_clear, *_power, *_thick, *_depth, *_tilt, *_turn, *_roll, *_size, *_ior, *_disp, *_refl,
         *_rough, *_bevel, *_bevAng, *_fstop, *_focus, *_gfocus, *_wblur, *_feather, *_wobble, *_wspeed, *_boost,
         *_thresh, *_mix, *_noise, *_smooth;
@@ -215,6 +229,7 @@ FacetGlassPlugin::FacetGlassPlugin(OfxImageEffectHandle handle) : ImageEffect(ha
     _minS = fetchIntParam(P_MINS);
     _maxS = fetchIntParam(P_MAXS);
     _both = fetchBooleanParam(P_BOTH);
+    _interacting = fetchBooleanParam(P_INTERACT);
     _prism = fetchDoubleParam(P_PRISM);
     _clear = fetchDoubleParam(P_CLEAR);
     _power = fetchDoubleParam(P_POWER);
@@ -318,7 +333,9 @@ void FacetGlassPlugin::readUI(double t, fg3d::UIParams& ui)
     ui.threshold = _thresh->getValueAtTime(t);
     ui.mix = _mix->getValueAtTime(t);
     ui.colorSpace = choiceAt(_cspace, t);
-    switch (choiceAt(_quality, t)) {
+    bool dragging = false;
+    _interacting->getValue(dragging);
+    switch (dragging ? (int)kQualityDraft : choiceAt(_quality, t)) {
     case kQualityDraft: ui.minSamples = 4; ui.maxSamples = 8; ui.noiseThreshold = 0.05; break;
     case kQualityGood: ui.minSamples = 12; ui.maxSamples = 48; ui.noiseThreshold = 0.03; break;
     case kQualityFinal: ui.minSamples = 48; ui.maxSamples = 384; ui.noiseThreshold = 0.008; break;
@@ -472,6 +489,223 @@ void FacetGlassPlugin::render(const RenderArguments& args)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// Viewer overlay: drag the centre dot to move, the ring to roll, inside the ring
+// to turn/tilt, the square to resize, and light dots to move lights.
+
+class GlassOverlay : public OverlayInteract
+{
+public:
+    GlassOverlay(OfxInteractHandle h, ImageEffect* e) : OverlayInteract(h)
+    {
+        _center = e->fetchDouble2DParam(P_CENTER);
+        _size = e->fetchDoubleParam(P_SIZE);
+        _tilt = e->fetchDoubleParam(P_TILT);
+        _turn = e->fetchDoubleParam(P_TURN);
+        _roll = e->fetchDoubleParam(P_ROLL);
+        _interacting = e->fetchBooleanParam(P_INTERACT);
+        _src = e->fetchClip(kOfxImageEffectSimpleSourceClipName);
+        for (int i = 0; i < kNumLights; ++i) {
+            _lpos[i] = e->fetchDouble2DParam(kLightPos[i]);
+            _lint[i] = e->fetchDoubleParam(kLightInt[i]);
+        }
+        addParamToSlaveTo(_center);
+        addParamToSlaveTo(_size);
+        addParamToSlaveTo(_roll);
+    }
+
+    bool draw(const DrawArgs& args) override;
+    bool penMotion(const PenArgs& args) override;
+    bool penDown(const PenArgs& args) override;
+    bool penUp(const PenArgs& args) override;
+
+private:
+    enum Part { kNone, kMove, kRoll, kSize, kSpin, kLight0 };
+    struct Geo { double x1, y1, w, h, cx, cy, r; };
+
+    Geo geo(double t) const
+    {
+        Geo g;
+        const OfxRectD rod = _src->getRegionOfDefinition(t);
+        g.x1 = rod.x1; g.y1 = rod.y1;
+        g.w = std::max(rod.x2 - rod.x1, 1.0); g.h = std::max(rod.y2 - rod.y1, 1.0);
+        const OfxPointD c = pointAt(_center, t);
+        g.cx = g.x1 + c.x * g.w; g.cy = g.y1 + c.y * g.h;
+        g.r = std::max(_size->getValueAtTime(t), 0.005) * 0.5 * g.h;
+        return g;
+    }
+
+    Part hit(const PenArgs& a, const Geo& g) const
+    {
+        const double tol = 8.0 * a.pixelScale.x;
+        const double px = a.penPosition.x, py = a.penPosition.y;
+        for (int i = 0; i < kNumLights; ++i) {
+            if (_lint[i]->getValueAtTime(a.time) <= 0) continue;
+            const OfxPointD l = pointAt(_lpos[i], a.time);
+            if (std::hypot(px - (g.x1 + l.x * g.w), py - (g.y1 + l.y * g.h)) < tol * 1.5) return (Part)(kLight0 + i);
+        }
+        const double r = std::max(g.r, 20.0 * a.pixelScale.x);
+        const double d = std::hypot(px - g.cx, py - g.cy);
+        const double sa = -0.25 * 3.14159265358979;
+        if (std::hypot(px - (g.cx + r * std::cos(sa)), py - (g.cy + r * std::sin(sa))) < tol * 1.3) return kSize;
+        if (d < tol * 1.5) return kMove;
+        if (std::fabs(d - r) < tol) return kRoll;
+        if (d < r) return kSpin;
+        return kNone;
+    }
+
+    static void circle(double x, double y, double r, int n = 64)
+    {
+        glBegin(GL_LINE_LOOP);
+        for (int i = 0; i < n; ++i) {
+            const double a = 2 * 3.14159265358979 * i / n;
+            glVertex2d(x + r * std::cos(a), y + r * std::sin(a));
+        }
+        glEnd();
+    }
+
+    void shapes(const Geo& g, double ps, double t, bool shadow) const
+    {
+        const double r = std::max(g.r, 20.0 * ps);
+        auto colour = [&](Part part) {
+            if (shadow) glColor4f(0, 0, 0, 0.6f);
+            else if (_drag == part || (_drag == kNone && _hover == part)) glColor4f(1.0f, 0.8f, 0.2f, 1.0f);
+            else glColor4f(0.9f, 0.9f, 0.9f, 0.9f);
+        };
+        colour(kSpin);
+        circle(g.cx, g.cy, r * 0.97, 48);  // inner hint
+        colour(kRoll);
+        glLineWidth(2.0f);
+        circle(g.cx, g.cy, r);
+        glLineWidth(1.0f);
+        // Roll tick.
+        const double ra = _roll->getValueAtTime(t) * 3.14159265358979 / 180.0;
+        glBegin(GL_LINES);
+        glVertex2d(g.cx + r * std::cos(ra), g.cy + r * std::sin(ra));
+        glVertex2d(g.cx + (r + 14 * ps) * std::cos(ra), g.cy + (r + 14 * ps) * std::sin(ra));
+        glEnd();
+        // Centre cross.
+        colour(kMove);
+        glBegin(GL_LINES);
+        glVertex2d(g.cx - 7 * ps, g.cy); glVertex2d(g.cx + 7 * ps, g.cy);
+        glVertex2d(g.cx, g.cy - 7 * ps); glVertex2d(g.cx, g.cy + 7 * ps);
+        glEnd();
+        circle(g.cx, g.cy, 3 * ps, 16);
+        // Size square.
+        colour(kSize);
+        const double sa = -0.25 * 3.14159265358979, sx = g.cx + r * std::cos(sa), sy = g.cy + r * std::sin(sa), s = 5 * ps;
+        glBegin(GL_LINE_LOOP);
+        glVertex2d(sx - s, sy - s); glVertex2d(sx + s, sy - s); glVertex2d(sx + s, sy + s); glVertex2d(sx - s, sy + s);
+        glEnd();
+        // Lights: a small sun.
+        for (int i = 0; i < kNumLights; ++i) {
+            if (_lint[i]->getValueAtTime(t) <= 0) continue;
+            const OfxPointD l = pointAt(_lpos[i], t);
+            const double lx = g.x1 + l.x * g.w, ly = g.y1 + l.y * g.h;
+            colour((Part)(kLight0 + i));
+            circle(lx, ly, 5 * ps, 16);
+            glBegin(GL_LINES);
+            for (int k = 0; k < 8; ++k) {
+                const double a = 3.14159265358979 / 4 * k;
+                glVertex2d(lx + 8 * ps * std::cos(a), ly + 8 * ps * std::sin(a));
+                glVertex2d(lx + 12 * ps * std::cos(a), ly + 12 * ps * std::sin(a));
+            }
+            glEnd();
+        }
+    }
+
+    Double2DParam* _center;
+    DoubleParam *_size, *_tilt, *_turn, *_roll;
+    BooleanParam* _interacting;
+    Clip* _src;
+    Double2DParam* _lpos[kNumLights];
+    DoubleParam* _lint[kNumLights];
+
+    Part _drag = kNone, _hover = kNone;
+    OfxPointD _start = { 0, 0 }, _startCenter = { 0, 0 };
+    double _startTilt = 0, _startTurn = 0, _startRoll = 0, _startAngle = 0;
+};
+
+bool GlassOverlay::draw(const DrawArgs& args)
+{
+    const Geo g = geo(args.time);
+    const double ps = args.pixelScale.x;
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_LINE_SMOOTH);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glTranslated(ps, -ps, 0);  // drop shadow for contrast on bright footage
+    shapes(g, ps, args.time, true);
+    glPopMatrix();
+    shapes(g, ps, args.time, false);
+    glPopAttrib();
+    return true;
+}
+
+bool GlassOverlay::penMotion(const PenArgs& args)
+{
+    const Geo g = geo(args.time);
+    if (_drag == kNone) {
+        const Part h = hit(args, g);
+        if (h != _hover) { _hover = h; _effect->redrawOverlays(); }
+        return false;
+    }
+    const double px = args.penPosition.x, py = args.penPosition.y;
+    const double dx = px - _start.x, dy = py - _start.y;
+    const double r = std::max(g.r, 20.0 * args.pixelScale.x);
+    if (_drag == kMove) {
+        _center->setValueAtTime(args.time, _startCenter.x + dx / g.w, _startCenter.y + dy / g.h);
+    } else if (_drag == kRoll) {
+        double a = (std::atan2(py - g.cy, px - g.cx) - _startAngle) * 180.0 / 3.14159265358979 + _startRoll;
+        while (a > 180) a -= 360;
+        while (a < -180) a += 360;
+        _roll->setValueAtTime(args.time, a);
+    } else if (_drag == kSize) {
+        _size->setValueAtTime(args.time, std::max(0.01, std::hypot(px - g.cx, py - g.cy) / (0.5 * g.h)));
+    } else if (_drag == kSpin) {
+        // Trackball: drag right swings the front of the glass right, drag up swings it up.
+        _turn->setValueAtTime(args.time, _startTurn - dx / r * 90.0);
+        _tilt->setValueAtTime(args.time, _startTilt + dy / r * 90.0);
+    } else if (_drag >= kLight0) {
+        const int i = _drag - kLight0;
+        _lpos[i]->setValueAtTime(args.time, (px - g.x1) / g.w, (py - g.y1) / g.h);
+    }
+    _effect->redrawOverlays();
+    return true;
+}
+
+bool GlassOverlay::penDown(const PenArgs& args)
+{
+    const Geo g = geo(args.time);
+    const Part h = hit(args, g);
+    if (h == kNone) return false;
+    _drag = h;
+    _start = args.penPosition;
+    _startCenter = pointAt(_center, args.time);
+    _startTilt = _tilt->getValueAtTime(args.time);
+    _startTurn = _turn->getValueAtTime(args.time);
+    _startRoll = _roll->getValueAtTime(args.time);
+    _startAngle = std::atan2(args.penPosition.y - g.cy, args.penPosition.x - g.cx);
+    _effect->beginEditBlock("FacetGlass handle");
+    _interacting->setValue(true);
+    _effect->redrawOverlays();
+    return true;
+}
+
+bool GlassOverlay::penUp(const PenArgs& args)
+{
+    if (_drag == kNone) return false;
+    _drag = kNone;
+    _interacting->setValue(false);  // back to full quality
+    _effect->endEditBlock();
+    _effect->redrawOverlays();
+    return true;
+}
+
+class GlassOverlayDescriptor : public DefaultEffectOverlayDescriptor<GlassOverlayDescriptor, GlassOverlay> {};
+
+////////////////////////////////////////////////////////////////////////////////
 // Factory
 
 class FacetGlassFactory : public PluginFactoryHelper<FacetGlassFactory>
@@ -499,6 +733,7 @@ void FacetGlassFactory::describe(ImageEffectDescriptor& desc)
     desc.setRenderTwiceAlways(false);
     desc.setSupportsMultipleClipPARs(false);
     desc.setRenderThreadSafety(eRenderFullySafe);
+    desc.setOverlayInteractDescriptor(new GlassOverlayDescriptor);
 #ifdef FG_HAVE_CUDA
     desc.setSupportsCudaRender(true);
     desc.setSupportsCudaStream(true);
@@ -716,6 +951,15 @@ void FacetGlassFactory::describeInContext(ImageEffectDescriptor& desc, ContextEn
     mn->setAnimates(false);
     mx->setAnimates(false);
     nz->setAnimates(false);
+
+    {
+        BooleanParamDescriptor* b = desc.defineBooleanParam(P_INTERACT);
+        b->setDefault(false);
+        b->setIsSecret(true);
+        b->setAnimates(false);
+        b->setLabels("Interacting", "Interacting", "Interacting");
+        b->setHint("Set while a viewer handle is dragged: renders at Draft quality.");
+    }
 
     g_page = nullptr;
 }

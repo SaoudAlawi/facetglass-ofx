@@ -116,6 +116,8 @@ if(FG_BUILD_PLUGIN AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/plugin/FacetGlassP
   target_include_directories(FacetGlass PRIVATE
     ${OFX_ROOT}/include ${OFX_ROOT}/Support/include ${OFX_ROOT}/Support/Library src/core src/host)
   target_link_libraries(FacetGlass PRIVATE fg3d_host)
+  find_package(OpenGL REQUIRED)
+  target_link_libraries(FacetGlass PRIVATE OpenGL::GL)
   if(FG_HAVE_CUDA)
     find_package(CUDAToolkit REQUIRED)
     target_link_libraries(FacetGlass PRIVATE fg3d_cuda CUDA::cudart_static)
