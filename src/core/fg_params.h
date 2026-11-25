@@ -33,6 +33,12 @@ typedef struct FGParams {
   float boost, threshold;
   float refl, lightX, lightY, lightSize, lightInt;
   float mix;
+
+  /* refract-source frame (its region of definition) in pixels at the current
+     render scale. Rays through the glass sample it in normalised coordinates,
+     so it may have a different resolution from the source. Equal to the frame
+     when not connected. */
+  float glsFrameX, glsFrameY, glsFrameW, glsFrameH;
 } FGParams;
 
 #endif

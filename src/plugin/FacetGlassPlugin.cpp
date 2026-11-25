@@ -322,6 +322,14 @@ void FacetGlassPlugin::render(const RenderArguments& args)
     p.glsX1 = gb.x1; p.glsY1 = gb.y1; p.glsW = gb.x2 - gb.x1; p.glsH = gb.y2 - gb.y1;
     p.glsStride = glsImg->getRowBytes() / 4;
     p.useSource = gls ? 1 : 0;
+    // Refract Source frame: its own RoD, so a different resolution maps by normalised position.
+    OfxRectI gframe = frame;
+    if (gls) gframe = toPixelEnclosing(_refractClip->getRegionOfDefinition(t), args.renderScale,
+                                       _refractClip->getPixelAspectRatio());
+    p.glsFrameX = (float)gframe.x1;
+    p.glsFrameY = (float)gframe.y1;
+    p.glsFrameW = (float)std::max(gframe.x2 - gframe.x1, 1);
+    p.glsFrameH = (float)std::max(gframe.y2 - gframe.y1, 1);
     const float* srcBase = static_cast<const float*>(src->getPixelAddress(sb.x1, sb.y1));
     const float* glsBase = static_cast<const float*>(glsImg->getPixelAddress(gb.x1, gb.y1));
 

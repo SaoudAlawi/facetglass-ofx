@@ -12,6 +12,7 @@ int main(int argc, char** argv) {
   FILE* f = fopen(argv[1], "rb"); if (fread(src.data(), 4, src.size(), f) != src.size()) return 2; fclose(f);
   FGParams p; memset(&p, 0, sizeof p);
   p.frameX = 0; p.frameY = 0; p.frameW = (float)W; p.frameH = (float)H;
+  p.glsFrameX = 0; p.glsFrameY = 0; p.glsFrameW = (float)W; p.glsFrameH = (float)H;
   p.srcX1 = p.glsX1 = 0; p.srcY1 = p.glsY1 = 0; p.srcW = p.glsW = W; p.srcH = p.glsH = H; p.srcStride = p.glsStride = W * 4;
   for (int a = 5; a < argc; a++) {
     char k[64]; double v = 0, v2 = 0;

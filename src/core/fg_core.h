@@ -282,12 +282,14 @@ FG_DEVICE fg4 fg_shade(FG_PRIV const FGParams* p, FG_GLOBAL const float* src, FG
     if (mode == FG_EDGE_BLACK && (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f)) valid = 0;
     if (tir != 0) valid = 0;
     if (valid != 0) {
-      float SX = p->frameX + fg_wrap(u, mode) * W;
-      float SY = p->frameY + fg_wrap(v, mode) * H;
+      float wu = fg_wrap(u, mode);
+      float wv = fg_wrap(v, mode);
       if (inG != 0 && p->useSource != 0)
-        c = fg_sample(gls, p->glsX1, p->glsY1, p->glsW, p->glsH, p->glsStride, SX, SY);
+        c = fg_sample(gls, p->glsX1, p->glsY1, p->glsW, p->glsH, p->glsStride,
+                      p->glsFrameX + wu * p->glsFrameW, p->glsFrameY + wv * p->glsFrameH);
       else
-        c = fg_sample(src, p->srcX1, p->srcY1, p->srcW, p->srcH, p->srcStride, SX, SY);
+        c = fg_sample(src, p->srcX1, p->srcY1, p->srcW, p->srcH, p->srcStride,
+                      p->frameX + wu * W, p->frameY + wv * H);
     }
 
     if (inG != 0) {
