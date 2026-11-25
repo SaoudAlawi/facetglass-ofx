@@ -502,33 +502,92 @@ void FacetGlassPlugin::render(const RenderArguments& args)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Overlay diagnostics: the first 300 events go to %TEMP%/FacetGlass_overlay.log
-// (hosts give no feedback when an overlay fails to draw).
+// Viewer overlay (gizmo). Colour-coded handles:
+//   white centre dot: move          red / green arrows: move along x / y only
+//   blue ring: roll                 red / green ellipses: tilt / turn
+//   inside the ring: free spin      white square: size
+//   purple arc (left): f-stop       orange arc (right): strength (IOR)
+//   yellow arc (top): focus         cyan bar (below): depth
+//   suns (tinted by Kelvin): lights
+// While a handle is dragged a hidden param switches the render to Draft.
 
-namespace {
-void overlayLog(const char* fmt, ...)
+namespace ov {
+
+const double kPi = 3.14159265358979323846;
+
+struct Col { float r, g, b; };
+const Col kWhite = { 0.95f, 0.95f, 0.95f }, kRed = { 1.0f, 0.36f, 0.36f }, kGreen = { 0.42f, 0.92f, 0.45f },
+          kBlue = { 0.38f, 0.62f, 1.0f }, kPurple = { 0.76f, 0.5f, 1.0f }, kOrange = { 1.0f, 0.62f, 0.22f },
+          kYellow = { 1.0f, 0.88f, 0.3f }, kCyan = { 0.25f, 0.88f, 0.95f };
+
+void circle(double x, double y, double r, int n = 64)
 {
-    static std::mutex mtx;
-    static int count = 0;
-    std::lock_guard<std::mutex> lock(mtx);
-    if (count >= 300) return;
-    ++count;
-    const char* tmp = std::getenv("TEMP");
-    const std::string path = std::string(tmp ? tmp : ".") + "/FacetGlass_overlay.log";
-    FILE* f = std::fopen(path.c_str(), count == 1 ? "w" : "a");
-    if (!f) return;
-    va_list ap;
-    va_start(ap, fmt);
-    std::vfprintf(f, fmt, ap);
-    va_end(ap);
-    std::fputc('\n', f);
-    std::fclose(f);
+    glBegin(GL_LINE_LOOP);
+    for (int i = 0; i < n; ++i) glVertex2d(x + r * std::cos(2 * kPi * i / n), y + r * std::sin(2 * kPi * i / n));
+    glEnd();
 }
-}  // namespace
+void disc(double x, double y, double r, int n = 20)
+{
+    glBegin(GL_TRIANGLE_FAN);
+    glVertex2d(x, y);
+    for (int i = 0; i <= n; ++i) glVertex2d(x + r * std::cos(2 * kPi * i / n), y + r * std::sin(2 * kPi * i / n));
+    glEnd();
+}
+void ellipse(double x, double y, double a, double b, int n = 64)
+{
+    glBegin(GL_LINE_LOOP);
+    for (int i = 0; i < n; ++i) glVertex2d(x + a * std::cos(2 * kPi * i / n), y + b * std::sin(2 * kPi * i / n));
+    glEnd();
+}
+void arc(double x, double y, double r, double a0, double a1, int n = 40)
+{
+    glBegin(GL_LINE_STRIP);
+    for (int i = 0; i <= n; ++i) {
+        const double a = (a0 + (a1 - a0) * i / n) * kPi / 180.0;
+        glVertex2d(x + r * std::cos(a), y + r * std::sin(a));
+    }
+    glEnd();
+}
 
-////////////////////////////////////////////////////////////////////////////////
-// Viewer overlay: drag the centre dot to move, the ring to roll, inside the ring
-// to turn/tilt, the square to resize, and light dots to move lights.
+// Tiny stroke font (seven segments + a few symbols) for value readouts.
+void text(double x, double y, double h, const char* s)
+{
+    // segments: 0 top, 1 top-right, 2 bottom-right, 3 bottom, 4 bottom-left, 5 top-left, 6 middle
+    static const unsigned char digit[10] = { 0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f };
+    const double w = h * 0.55, adv = h * 0.8;
+    glBegin(GL_LINES);
+    for (const char* c = s; *c; ++c, x += adv) {
+        auto seg = [&](int k) {
+            const double xs[6][4] = { { 0, 1, 1, 1 }, { 1, 1, 1, 0.5 }, { 1, 0.5, 1, 0 }, { 0, 0, 1, 0 },
+                                      { 0, 0.5, 0, 0 }, { 0, 1, 0, 0.5 } };
+            if (k == 6) { glVertex2d(x, y + 0.5 * h); glVertex2d(x + w, y + 0.5 * h); return; }
+            glVertex2d(x + xs[k][0] * w, y + xs[k][1] * h);
+            glVertex2d(x + xs[k][2] * w, y + xs[k][3] * h);
+        };
+        if (*c >= '0' && *c <= '9') {
+            for (int k = 0; k < 7; ++k)
+                if (digit[*c - '0'] & (1 << k)) seg(k);
+        } else if (*c == '.') {
+            glVertex2d(x + 0.1 * w, y); glVertex2d(x + 0.25 * w, y);
+            x -= adv * 0.6;
+        } else if (*c == '/') {
+            glVertex2d(x, y); glVertex2d(x + w, y + h);
+        } else if (*c == 'f') {
+            glVertex2d(x + 0.2 * w, y); glVertex2d(x + 0.2 * w, y + h);
+            glVertex2d(x + 0.2 * w, y + h); glVertex2d(x + w, y + h);
+            glVertex2d(x + 0.2 * w, y + 0.55 * h); glVertex2d(x + 0.8 * w, y + 0.55 * h);
+        } else if (*c == '-') {
+            seg(6);
+        } else if (*c == '%') {
+            glVertex2d(x, y); glVertex2d(x + w, y + h);
+            glVertex2d(x, y + h); glVertex2d(x + 0.2 * w, y + h);
+            glVertex2d(x + 0.8 * w, y); glVertex2d(x + w, y);
+        }
+    }
+    glEnd();
+}
+
+}  // namespace ov
 
 class GlassOverlay : public OverlayInteract
 {
@@ -540,274 +599,370 @@ public:
         _tilt = e->fetchDoubleParam(P_TILT);
         _turn = e->fetchDoubleParam(P_TURN);
         _roll = e->fetchDoubleParam(P_ROLL);
+        _depth = e->fetchDoubleParam(P_DEPTH);
+        _fstop = e->fetchDoubleParam(P_FSTOP);
+        _ior = e->fetchDoubleParam(P_IOR);
+        _focus = e->fetchDoubleParam(P_FOCUS);
         _interacting = e->fetchBooleanParam(P_INTERACT);
         _src = e->fetchClip(kOfxImageEffectSimpleSourceClipName);
         for (int i = 0; i < kNumLights; ++i) {
             _lpos[i] = e->fetchDouble2DParam(kLightPos[i]);
             _lint[i] = e->fetchDoubleParam(kLightInt[i]);
+            _lkel[i] = e->fetchDoubleParam(kLightKelvin[i]);
         }
-        addParamToSlaveTo(_center);
-        addParamToSlaveTo(_size);
-        addParamToSlaveTo(_roll);
-        overlayLog("overlay created");
+        for (Param* p : std::initializer_list<Param*>{ _center, _size, _tilt, _turn, _roll, _depth, _fstop, _ior, _focus })
+            addParamToSlaveTo(p);
     }
 
-    bool draw(const DrawArgs& args) override;
-    bool penMotion(const PenArgs& args) override;
-    bool penDown(const PenArgs& args) override;
-    bool penUp(const PenArgs& args) override;
+    bool draw(const DrawArgs& args) override
+    {
+        try { return drawImpl(args); } catch (...) { return false; }
+    }
+    bool penMotion(const PenArgs& args) override
+    {
+        try { return motionImpl(args); } catch (...) { return false; }
+    }
+    bool penDown(const PenArgs& args) override
+    {
+        try { return downImpl(args); } catch (...) { return false; }
+    }
+    bool penUp(const PenArgs& args) override
+    {
+        try { return upImpl(args); } catch (...) { return false; }
+    }
 
 private:
-    bool penMotionImpl(const PenArgs& args);
-    bool penDownImpl(const PenArgs& args);
-    bool penUpImpl(const PenArgs& args);
-    enum Part { kNone, kMove, kRoll, kSize, kSpin, kLight0 };
-    struct Geo { double x1, y1, w, h, cx, cy, r; };
+    enum Part { kNone, kMove, kMoveX, kMoveY, kRoll, kTilt, kTurn, kSpin, kSize, kFStop, kIOR, kFocus, kDepth, kLight0 };
 
-    Geo geo(double t) const
+    // Value ranges shown on the handles.
+    static constexpr double kFMin = 0.95, kFMax = 22.0, kIorMin = 1.0, kIorMax = 2.5, kDMin = 0.02, kDMax = 0.6;
+    static constexpr double kFA0 = 140, kFA1 = 220;   // f-stop arc (left), degrees
+    static constexpr double kIA0 = -40, kIA1 = 40;    // IOR arc (right)
+    static constexpr double kCA0 = 130, kCA1 = 50;    // focus arc (top): glass -> footage
+
+    struct Geo { double x1, y1, w, h, cx, cy, r, ps; };
+
+    Geo geo(double t, double ps) const
     {
         Geo g;
-        // The clip RoD is not available in every action on every host: fall back
-        // to the project frame, which hosts always provide.
         OfxRectD rod = { 0, 0, 0, 0 };
-        try {
-            rod = _src->getRegionOfDefinition(t);
-        } catch (...) {
-            rod.x2 = rod.x1 = 0;
-        }
+        try { rod = _src->getRegionOfDefinition(t); } catch (...) {}
         if (rod.x2 - rod.x1 < 2 || rod.y2 - rod.y1 < 2) {
             try {
-                OfxPointD off = _effect->getProjectOffset(), sz = _effect->getProjectSize();
+                const OfxPointD off = _effect->getProjectOffset(), sz = _effect->getProjectSize();
                 rod = { off.x, off.y, off.x + sz.x, off.y + sz.y };
-            } catch (...) {
-                rod = { 0, 0, 1920, 1080 };
-            }
+            } catch (...) { rod = { 0, 0, 1920, 1080 }; }
         }
         g.x1 = rod.x1; g.y1 = rod.y1;
         g.w = std::max(rod.x2 - rod.x1, 1.0); g.h = std::max(rod.y2 - rod.y1, 1.0);
         const OfxPointD c = pointAt(_center, t);
         g.cx = g.x1 + c.x * g.w; g.cy = g.y1 + c.y * g.h;
-        g.r = std::max(_size->getValueAtTime(t), 0.005) * 0.5 * g.h;
+        g.ps = ps > 0 ? ps : 1.0;
+        g.r = std::max(std::max(_size->getValueAtTime(t), 0.005) * 0.5 * g.h, 45.0 * g.ps);
         return g;
+    }
+
+    static double clamp01(double v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+    double arcR(const Geo& g) const { return g.r + 16 * g.ps; }
+    double fT(double t) const { return clamp01(std::log(_fstop->getValueAtTime(t) / kFMin) / std::log(kFMax / kFMin)); }
+    double iT(double t) const { return clamp01((_ior->getValueAtTime(t) - kIorMin) / (kIorMax - kIorMin)); }
+    double cT(double t) const { return clamp01(_focus->getValueAtTime(t)); }
+    double dT(double t) const { return clamp01((_depth->getValueAtTime(t) - kDMin) / (kDMax - kDMin)); }
+    double barY(const Geo& g) const { return g.cy - g.r - 34 * g.ps; }
+
+    static OfxPointD onArc(const Geo& g, double r, double deg)
+    {
+        return { g.cx + r * std::cos(deg * ov::kPi / 180), g.cy + r * std::sin(deg * ov::kPi / 180) };
+    }
+    // Angle of the pen around the centre, mapped to t along an arc (a0 -> a1), or -1 if off the arc's span.
+    static double arcParam(const Geo& g, double px, double py, double a0, double a1)
+    {
+        double a = std::atan2(py - g.cy, px - g.cx) * 180 / ov::kPi;
+        const double mid = 0.5 * (a0 + a1);
+        while (a - mid > 180) a -= 360;
+        while (a - mid < -180) a += 360;
+        return (a - a0) / (a1 - a0);
     }
 
     Part hit(const PenArgs& a, const Geo& g) const
     {
-        const double tol = 8.0 * a.pixelScale.x;
-        const double px = a.penPosition.x, py = a.penPosition.y;
+        const double tol = 7.0 * g.ps, px = a.penPosition.x, py = a.penPosition.y, t = a.time;
+        auto isNear = [&](OfxPointD p, double k = 1.0) { return std::hypot(px - p.x, py - p.y) < tol * k; };
         for (int i = 0; i < kNumLights; ++i) {
-            if (_lint[i]->getValueAtTime(a.time) <= 0) continue;
-            const OfxPointD l = pointAt(_lpos[i], a.time);
-            if (std::hypot(px - (g.x1 + l.x * g.w), py - (g.y1 + l.y * g.h)) < tol * 1.5) return (Part)(kLight0 + i);
+            if (_lint[i]->getValueAtTime(t) <= 0) continue;
+            const OfxPointD l = pointAt(_lpos[i], t);
+            if (isNear({ g.x1 + l.x * g.w, g.y1 + l.y * g.h }, 1.8)) return (Part)(kLight0 + i);
         }
-        const double r = std::max(g.r, 20.0 * a.pixelScale.x);
+        const double R = arcR(g);
+        // Knobs first (small targets win over long curves).
+        if (isNear(onArc(g, R, kFA0 + (kFA1 - kFA0) * fT(t)), 1.6)) return kFStop;
+        if (isNear(onArc(g, R, kIA0 + (kIA1 - kIA0) * iT(t)), 1.6)) return kIOR;
+        if (isNear(onArc(g, R, kCA0 + (kCA1 - kCA0) * cT(t)), 1.6)) return kFocus;
+        if (isNear({ g.cx - g.r + 2 * g.r * dT(t), barY(g) }, 1.6)) return kDepth;
+        if (isNear(onArc(g, g.r, -45), 1.4)) return kSize;
+        if (isNear({ g.cx, g.cy }, 1.6)) return kMove;
+        const double al = 0.42 * g.r;
+        if (py > g.cy - tol && py < g.cy + tol && px > g.cx + 3 * tol && px < g.cx + al + tol) return kMoveX;
+        if (px > g.cx - tol && px < g.cx + tol && py > g.cy + 3 * tol && py < g.cy + al + tol) return kMoveY;
+        // Arc and bar bodies.
         const double d = std::hypot(px - g.cx, py - g.cy);
-        const double sa = -0.25 * 3.14159265358979;
-        if (std::hypot(px - (g.cx + r * std::cos(sa)), py - (g.cy + r * std::sin(sa))) < tol * 1.3) return kSize;
-        if (d < tol * 1.5) return kMove;
-        if (std::fabs(d - r) < tol) return kRoll;
-        if (d < r) return kSpin;
+        if (std::fabs(d - R) < tol) {
+            const double tf = arcParam(g, px, py, kFA0, kFA1), ti = arcParam(g, px, py, kIA0, kIA1),
+                         tc = arcParam(g, px, py, kCA0, kCA1);
+            if (tf >= 0 && tf <= 1) return kFStop;
+            if (ti >= 0 && ti <= 1) return kIOR;
+            if (tc >= 0 && tc <= 1) return kFocus;
+        }
+        if (std::fabs(py - barY(g)) < tol && px > g.cx - g.r - tol && px < g.cx + g.r + tol) return kDepth;
+        if (std::fabs(d - g.r) < tol) return kRoll;
+        // Tilt (vertical) and turn (horizontal) ellipses.
+        auto onEllipse = [&](double ea, double eb) {
+            const double q = std::sqrt(((px - g.cx) / ea) * ((px - g.cx) / ea) + ((py - g.cy) / eb) * ((py - g.cy) / eb));
+            return std::fabs(q - 1.0) * std::min(ea, eb) < tol;
+        };
+        if (onEllipse(0.32 * g.r, 0.92 * g.r)) return kTilt;
+        if (onEllipse(0.92 * g.r, 0.32 * g.r)) return kTurn;
+        if (d < g.r) return kSpin;
         return kNone;
     }
 
-    static void circle(double x, double y, double r, int n = 64)
+    void colour(const ov::Col& c, Part part, bool shadow) const
     {
-        glBegin(GL_LINE_LOOP);
-        for (int i = 0; i < n; ++i) {
-            const double a = 2 * 3.14159265358979 * i / n;
-            glVertex2d(x + r * std::cos(a), y + r * std::sin(a));
-        }
-        glEnd();
+        if (shadow) { glColor4f(0, 0, 0, 0.55f); return; }
+        const bool hot = _drag == part || (_drag == kNone && _hover == part);
+        if (hot) glColor4f(std::min(1.0f, c.r + 0.25f), std::min(1.0f, c.g + 0.25f), std::min(1.0f, c.b + 0.25f), 1.0f);
+        else glColor4f(c.r, c.g, c.b, 0.85f);
+        glLineWidth(hot ? 3.0f : 1.6f);
     }
+    bool hot(Part p) const { return _drag == p || (_drag == kNone && _hover == p); }
 
-    void shapes(const Geo& g, double ps, double t, bool shadow) const
+    void shapes(const Geo& g, double t, bool sh) const
     {
-        const double r = std::max(g.r, 20.0 * ps);
-        auto colour = [&](Part part) {
-            if (shadow) glColor4f(0, 0, 0, 0.6f);
-            else if (_drag == part || (_drag == kNone && _hover == part)) glColor4f(1.0f, 0.8f, 0.2f, 1.0f);
-            else glColor4f(0.9f, 0.9f, 0.9f, 0.9f);
-        };
-        colour(kSpin);
-        circle(g.cx, g.cy, r * 0.97, 48);  // inner hint
-        colour(kRoll);
-        glLineWidth(2.0f);
-        circle(g.cx, g.cy, r);
-        glLineWidth(1.0f);
-        // Roll tick.
-        const double ra = _roll->getValueAtTime(t) * 3.14159265358979 / 180.0;
+        const double ps = g.ps, R = arcR(g);
+        if (sh) glLineWidth(3.0f);
+
+        // Rotation: tilt / turn ellipses, roll ring.
+        colour(ov::kRed, kTilt, sh);
+        ov::ellipse(g.cx, g.cy, 0.32 * g.r, 0.92 * g.r);
+        colour(ov::kGreen, kTurn, sh);
+        ov::ellipse(g.cx, g.cy, 0.92 * g.r, 0.32 * g.r);
+        colour(ov::kBlue, kRoll, sh);
+        ov::circle(g.cx, g.cy, g.r, 96);
+        const double ra = _roll->getValueAtTime(t);
+        const OfxPointD r0 = onArc(g, g.r, ra), r1 = onArc(g, g.r - 10 * ps, ra);
+        glBegin(GL_LINES); glVertex2d(r0.x, r0.y); glVertex2d(r1.x, r1.y); glEnd();
+
+        // Orientation triad: the glass's own axes projected to the screen.
+        if (!sh) {
+            const double rx = _tilt->getValueAtTime(t) * ov::kPi / 180, ry = _turn->getValueAtTime(t) * ov::kPi / 180,
+                         rz = ra * ov::kPi / 180;
+            const double cx = std::cos(rx), sx = std::sin(rx), cy = std::cos(ry), sy = std::sin(ry), cz = std::cos(rz),
+                         sz = std::sin(rz);
+            const double M[9] = { cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx,
+                                  sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx,
+                                  -sy, cy * sx, cy * cx };
+            const double L = 0.22 * g.r;
+            const ov::Col cols[3] = { ov::kRed, ov::kGreen, ov::kBlue };
+            glLineWidth(2.0f);
+            for (int k = 0; k < 3; ++k) {
+                glColor4f(cols[k].r, cols[k].g, cols[k].b, 0.6f);
+                // Screen y is up and z points away from the camera (-z faces us).
+                glBegin(GL_LINES);
+                glVertex2d(g.cx, g.cy);
+                glVertex2d(g.cx + L * M[k], g.cy + L * M[3 + k]);
+                glEnd();
+            }
+        }
+
+        // Move: centre dot and axis arrows.
+        const double al = 0.42 * g.r, hs = 6 * ps;
+        colour(ov::kRed, kMoveX, sh);
         glBegin(GL_LINES);
-        glVertex2d(g.cx + r * std::cos(ra), g.cy + r * std::sin(ra));
-        glVertex2d(g.cx + (r + 14 * ps) * std::cos(ra), g.cy + (r + 14 * ps) * std::sin(ra));
+        glVertex2d(g.cx + 9 * ps, g.cy); glVertex2d(g.cx + al, g.cy);
+        glVertex2d(g.cx + al, g.cy); glVertex2d(g.cx + al - hs, g.cy + hs * 0.6);
+        glVertex2d(g.cx + al, g.cy); glVertex2d(g.cx + al - hs, g.cy - hs * 0.6);
         glEnd();
-        // Centre cross.
-        colour(kMove);
+        colour(ov::kGreen, kMoveY, sh);
         glBegin(GL_LINES);
-        glVertex2d(g.cx - 7 * ps, g.cy); glVertex2d(g.cx + 7 * ps, g.cy);
-        glVertex2d(g.cx, g.cy - 7 * ps); glVertex2d(g.cx, g.cy + 7 * ps);
+        glVertex2d(g.cx, g.cy + 9 * ps); glVertex2d(g.cx, g.cy + al);
+        glVertex2d(g.cx, g.cy + al); glVertex2d(g.cx - hs * 0.6, g.cy + al - hs);
+        glVertex2d(g.cx, g.cy + al); glVertex2d(g.cx + hs * 0.6, g.cy + al - hs);
         glEnd();
-        circle(g.cx, g.cy, 3 * ps, 16);
-        // Size square.
-        colour(kSize);
-        const double sa = -0.25 * 3.14159265358979, sx = g.cx + r * std::cos(sa), sy = g.cy + r * std::sin(sa), s = 5 * ps;
+        colour(ov::kWhite, kMove, sh);
+        ov::circle(g.cx, g.cy, 6 * ps, 20);
+        if (!sh) ov::disc(g.cx, g.cy, 2.5 * ps, 12);
+
+        // Size square on the ring.
+        colour(ov::kWhite, kSize, sh);
+        const OfxPointD sq = onArc(g, g.r, -45);
+        const double s = 5 * ps;
         glBegin(GL_LINE_LOOP);
-        glVertex2d(sx - s, sy - s); glVertex2d(sx + s, sy - s); glVertex2d(sx + s, sy + s); glVertex2d(sx - s, sy + s);
+        glVertex2d(sq.x - s, sq.y - s); glVertex2d(sq.x + s, sq.y - s); glVertex2d(sq.x + s, sq.y + s); glVertex2d(sq.x - s, sq.y + s);
         glEnd();
-        // Lights: a small sun.
+
+        // Value arcs with knobs.
+        auto valueArc = [&](const ov::Col& c, Part p, double a0, double a1, double tv) {
+            colour(c, p, sh);
+            ov::arc(g.cx, g.cy, R, a0, a1);
+            const OfxPointD k = onArc(g, R, a0 + (a1 - a0) * tv);
+            if (sh) ov::circle(k.x, k.y, 6 * ps, 16); else ov::disc(k.x, k.y, (hot(p) ? 6.5 : 5) * ps);
+        };
+        valueArc(ov::kPurple, kFStop, kFA0, kFA1, fT(t));
+        valueArc(ov::kOrange, kIOR, kIA0, kIA1, iT(t));
+        valueArc(ov::kYellow, kFocus, kCA0, kCA1, cT(t));
+
+        // Depth bar with knob.
+        colour(ov::kCyan, kDepth, sh);
+        const double by = barY(g);
+        glBegin(GL_LINES);
+        glVertex2d(g.cx - g.r, by); glVertex2d(g.cx + g.r, by);
+        glVertex2d(g.cx - g.r, by - 4 * ps); glVertex2d(g.cx - g.r, by + 4 * ps);
+        glVertex2d(g.cx + g.r, by - 4 * ps); glVertex2d(g.cx + g.r, by + 4 * ps);
+        glEnd();
+        const double kx = g.cx - g.r + 2 * g.r * dT(t);
+        if (sh) ov::circle(kx, by, 6 * ps, 16); else ov::disc(kx, by, (hot(kDepth) ? 6.5 : 5) * ps);
+
+        // Lights, tinted by colour temperature.
         for (int i = 0; i < kNumLights; ++i) {
             if (_lint[i]->getValueAtTime(t) <= 0) continue;
             const OfxPointD l = pointAt(_lpos[i], t);
             const double lx = g.x1 + l.x * g.w, ly = g.y1 + l.y * g.h;
-            colour((Part)(kLight0 + i));
-            circle(lx, ly, 5 * ps, 16);
+            float rgb[3];
+            fg3d::kelvinToRGB(_lkel[i]->getValueAtTime(t), rgb);
+            colour({ rgb[0], rgb[1], rgb[2] }, (Part)(kLight0 + i), sh);
+            ov::circle(lx, ly, 6 * ps, 16);
             glBegin(GL_LINES);
             for (int k = 0; k < 8; ++k) {
-                const double a = 3.14159265358979 / 4 * k;
-                glVertex2d(lx + 8 * ps * std::cos(a), ly + 8 * ps * std::sin(a));
-                glVertex2d(lx + 12 * ps * std::cos(a), ly + 12 * ps * std::sin(a));
+                const double a = ov::kPi / 4 * k;
+                glVertex2d(lx + 9 * ps * std::cos(a), ly + 9 * ps * std::sin(a));
+                glVertex2d(lx + 14 * ps * std::cos(a), ly + 14 * ps * std::sin(a));
             }
             glEnd();
         }
+
+        // Readout for the active handle.
+        if (!sh && (_drag != kNone || _hover != kNone)) {
+            const Part p = _drag != kNone ? _drag : _hover;
+            char buf[32] = { 0 };
+            ov::Col c = ov::kWhite;
+            if (p == kFStop) { std::snprintf(buf, sizeof buf, "f/%.1f", _fstop->getValueAtTime(t)); c = ov::kPurple; }
+            else if (p == kIOR) { std::snprintf(buf, sizeof buf, "%.2f", _ior->getValueAtTime(t)); c = ov::kOrange; }
+            else if (p == kFocus) { std::snprintf(buf, sizeof buf, "%.0f%%", 100 * _focus->getValueAtTime(t)); c = ov::kYellow; }
+            else if (p == kDepth) { std::snprintf(buf, sizeof buf, "%.3f", _depth->getValueAtTime(t)); c = ov::kCyan; }
+            else if (p == kSize) { std::snprintf(buf, sizeof buf, "%.2f", _size->getValueAtTime(t)); }
+            else if (p == kRoll) { std::snprintf(buf, sizeof buf, "%.0f", ra); c = ov::kBlue; }
+            else if (p == kTilt || p == kSpin) { std::snprintf(buf, sizeof buf, "%.0f", _tilt->getValueAtTime(t)); c = ov::kRed; }
+            else if (p == kTurn) { std::snprintf(buf, sizeof buf, "%.0f", _turn->getValueAtTime(t)); c = ov::kGreen; }
+            if (buf[0]) {
+                glLineWidth(1.8f);
+                glColor4f(0, 0, 0, 0.7f);
+                ov::text(_lastPen.x + 14 * ps + ps, _lastPen.y + 10 * ps - ps, 11 * ps, buf);
+                glColor4f(c.r, c.g, c.b, 1.0f);
+                ov::text(_lastPen.x + 14 * ps, _lastPen.y + 10 * ps, 11 * ps, buf);
+            }
+        }
+    }
+
+    bool drawImpl(const DrawArgs& args)
+    {
+        const Geo g = geo(args.time, args.pixelScale.x);
+        glPushAttrib(GL_ALL_ATTRIB_BITS);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glEnable(GL_LINE_SMOOTH);
+        glMatrixMode(GL_MODELVIEW);
+        glPushMatrix();
+        glTranslated(g.ps, -g.ps, 0);  // shadow pass for contrast on bright footage
+        shapes(g, args.time, true);
+        glPopMatrix();
+        shapes(g, args.time, false);
+        glPopAttrib();
+        return true;
+    }
+
+    bool motionImpl(const PenArgs& a)
+    {
+        const Geo g = geo(a.time, a.pixelScale.x);
+        _lastPen = a.penPosition;
+        if (_drag == kNone) {
+            const Part h = hit(a, g);
+            if (h != _hover || h != kNone) { _hover = h; _effect->redrawOverlays(); }
+            return false;
+        }
+        const double px = a.penPosition.x, py = a.penPosition.y, t = a.time;
+        const double dx = px - _start.x, dy = py - _start.y;
+        switch (_drag) {
+        case kMove: _center->setValueAtTime(t, _c0.x + dx / g.w, _c0.y + dy / g.h); break;
+        case kMoveX: _center->setValueAtTime(t, _c0.x + dx / g.w, _c0.y); break;
+        case kMoveY: _center->setValueAtTime(t, _c0.x, _c0.y + dy / g.h); break;
+        case kRoll: {
+            double v = (std::atan2(py - g.cy, px - g.cx) - _a0) * 180 / ov::kPi + _roll0;
+            while (v > 180) v -= 360;
+            while (v < -180) v += 360;
+            _roll->setValueAtTime(t, v);
+            break;
+        }
+        case kTilt: _tilt->setValueAtTime(t, _tilt0 + dy / g.r * 90); break;
+        case kTurn: _turn->setValueAtTime(t, _turn0 - dx / g.r * 90); break;
+        case kSpin:
+            _turn->setValueAtTime(t, _turn0 - dx / g.r * 90);
+            _tilt->setValueAtTime(t, _tilt0 + dy / g.r * 90);
+            break;
+        case kSize: _size->setValueAtTime(t, std::max(0.01, std::hypot(px - g.cx, py - g.cy) / (0.5 * g.h))); break;
+        case kFStop: {
+            const double u = clamp01(arcParam(g, px, py, kFA0, kFA1));
+            _fstop->setValueAtTime(t, kFMin * std::pow(kFMax / kFMin, u));
+            break;
+        }
+        case kIOR: _ior->setValueAtTime(t, kIorMin + (kIorMax - kIorMin) * clamp01(arcParam(g, px, py, kIA0, kIA1))); break;
+        case kFocus: _focus->setValueAtTime(t, clamp01(arcParam(g, px, py, kCA0, kCA1))); break;
+        case kDepth: _depth->setValueAtTime(t, kDMin + (kDMax - kDMin) * clamp01((px - (g.cx - g.r)) / (2 * g.r))); break;
+        default:
+            if (_drag >= kLight0) _lpos[_drag - kLight0]->setValueAtTime(t, (px - g.x1) / g.w, (py - g.y1) / g.h);
+        }
+        _effect->redrawOverlays();
+        return true;
+    }
+
+    bool downImpl(const PenArgs& a)
+    {
+        const Geo g = geo(a.time, a.pixelScale.x);
+        const Part h = hit(a, g);
+        if (h == kNone) return false;
+        _drag = h;
+        _start = _lastPen = a.penPosition;
+        _c0 = pointAt(_center, a.time);
+        _tilt0 = _tilt->getValueAtTime(a.time);
+        _turn0 = _turn->getValueAtTime(a.time);
+        _roll0 = _roll->getValueAtTime(a.time);
+        _a0 = std::atan2(a.penPosition.y - g.cy, a.penPosition.x - g.cx);
+        _effect->beginEditBlock("FacetGlass handle");
+        _interacting->setValue(true);
+        _effect->redrawOverlays();
+        return true;
+    }
+
+    bool upImpl(const PenArgs&)
+    {
+        if (_drag == kNone) return false;
+        _drag = kNone;
+        _interacting->setValue(false);  // back to full quality
+        _effect->endEditBlock();
+        _effect->redrawOverlays();
+        return true;
     }
 
     Double2DParam* _center;
-    DoubleParam *_size, *_tilt, *_turn, *_roll;
+    DoubleParam *_size, *_tilt, *_turn, *_roll, *_depth, *_fstop, *_ior, *_focus;
     BooleanParam* _interacting;
     Clip* _src;
     Double2DParam* _lpos[kNumLights];
-    DoubleParam* _lint[kNumLights];
+    DoubleParam *_lint[kNumLights], *_lkel[kNumLights];
 
     Part _drag = kNone, _hover = kNone;
-    OfxPointD _start = { 0, 0 }, _startCenter = { 0, 0 };
-    double _startTilt = 0, _startTurn = 0, _startRoll = 0, _startAngle = 0;
+    OfxPointD _start = { 0, 0 }, _c0 = { 0, 0 }, _lastPen = { 0, 0 };
+    double _tilt0 = 0, _turn0 = 0, _roll0 = 0, _a0 = 0;
 };
-
-bool GlassOverlay::draw(const DrawArgs& args)
-{
-    static int draws = 0;
-    try {
-    const Geo g = geo(args.time);
-    if (draws++ < 5)
-        overlayLog("draw t=%g pixelScale=%g,%g rod=%g,%g %gx%g centre=%g,%g radius=%g", args.time, args.pixelScale.x,
-                   args.pixelScale.y, g.x1, g.y1, g.w, g.h, g.cx, g.cy, g.r);
-    const double ps = args.pixelScale.x;
-    glPushAttrib(GL_ALL_ATTRIB_BITS);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_LINE_SMOOTH);
-    glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    glTranslated(ps, -ps, 0);  // drop shadow for contrast on bright footage
-    shapes(g, ps, args.time, true);
-    glPopMatrix();
-    shapes(g, ps, args.time, false);
-    glPopAttrib();
-    if (draws <= 5) overlayLog("draw done, GL error %d", (int)glGetError());
-    return true;
-    } catch (const std::exception& e) {
-        overlayLog("draw exception: %s", e.what());
-    } catch (...) {
-        overlayLog("draw exception");
-    }
-    return false;
-}
-
-bool GlassOverlay::penMotion(const PenArgs& args)
-{
-    try {
-        return penMotionImpl(args);
-    } catch (const std::exception& e) {
-        overlayLog("penMotion exception: %s", e.what());
-    } catch (...) {
-        overlayLog("penMotion exception");
-    }
-    return false;
-}
-
-bool GlassOverlay::penMotionImpl(const PenArgs& args)
-{
-    const Geo g = geo(args.time);
-    if (_drag == kNone) {
-        const Part h = hit(args, g);
-        if (h != _hover) { _hover = h; _effect->redrawOverlays(); }
-        return false;
-    }
-    const double px = args.penPosition.x, py = args.penPosition.y;
-    const double dx = px - _start.x, dy = py - _start.y;
-    const double r = std::max(g.r, 20.0 * args.pixelScale.x);
-    if (_drag == kMove) {
-        _center->setValueAtTime(args.time, _startCenter.x + dx / g.w, _startCenter.y + dy / g.h);
-    } else if (_drag == kRoll) {
-        double a = (std::atan2(py - g.cy, px - g.cx) - _startAngle) * 180.0 / 3.14159265358979 + _startRoll;
-        while (a > 180) a -= 360;
-        while (a < -180) a += 360;
-        _roll->setValueAtTime(args.time, a);
-    } else if (_drag == kSize) {
-        _size->setValueAtTime(args.time, std::max(0.01, std::hypot(px - g.cx, py - g.cy) / (0.5 * g.h)));
-    } else if (_drag == kSpin) {
-        // Trackball: drag right swings the front of the glass right, drag up swings it up.
-        _turn->setValueAtTime(args.time, _startTurn - dx / r * 90.0);
-        _tilt->setValueAtTime(args.time, _startTilt + dy / r * 90.0);
-    } else if (_drag >= kLight0) {
-        const int i = _drag - kLight0;
-        _lpos[i]->setValueAtTime(args.time, (px - g.x1) / g.w, (py - g.y1) / g.h);
-    }
-    _effect->redrawOverlays();
-    return true;
-}
-
-bool GlassOverlay::penDown(const PenArgs& args)
-{
-    try {
-        return penDownImpl(args);
-    } catch (const std::exception& e) {
-        overlayLog("penDown exception: %s", e.what());
-    } catch (...) {
-        overlayLog("penDown exception");
-    }
-    return false;
-}
-
-bool GlassOverlay::penDownImpl(const PenArgs& args)
-{
-    const Geo g = geo(args.time);
-    const Part h = hit(args, g);
-    overlayLog("penDown at %g,%g part %d", args.penPosition.x, args.penPosition.y, (int)h);
-    if (h == kNone) return false;
-    _drag = h;
-    _start = args.penPosition;
-    _startCenter = pointAt(_center, args.time);
-    _startTilt = _tilt->getValueAtTime(args.time);
-    _startTurn = _turn->getValueAtTime(args.time);
-    _startRoll = _roll->getValueAtTime(args.time);
-    _startAngle = std::atan2(args.penPosition.y - g.cy, args.penPosition.x - g.cx);
-    _effect->beginEditBlock("FacetGlass handle");
-    _interacting->setValue(true);
-    _effect->redrawOverlays();
-    return true;
-}
-
-bool GlassOverlay::penUp(const PenArgs& args)
-{
-    try {
-        return penUpImpl(args);
-    } catch (const std::exception& e) {
-        overlayLog("penUp exception: %s", e.what());
-    } catch (...) {
-        overlayLog("penUp exception");
-    }
-    return false;
-}
-
-bool GlassOverlay::penUpImpl(const PenArgs& args)
-{
-    if (_drag == kNone) return false;
-    _drag = kNone;
-    _interacting->setValue(false);  // back to full quality
-    _effect->endEditBlock();
-    _effect->redrawOverlays();
-    return true;
-}
 
 class GlassOverlayDescriptor : public DefaultEffectOverlayDescriptor<GlassOverlayDescriptor, GlassOverlay> {};
 
@@ -973,7 +1128,7 @@ void FacetGlassFactory::describeInContext(ImageEffectDescriptor& desc, ContextEn
     // ---------------------------------------------------------------- Placement
     GroupParamDescriptor* gp = group(desc, "placementGroup", "Placement");
     point(desc, P_CENTER, "Center", "Position of the glass in the frame (0..1, y up).", gp, 0.5, 0.5);
-    dbl(desc, P_DEPTH, "Depth", "Distance of the glass from the lens; the footage is at 1.", gp, 0.15, 0.02, 0.6, 0.01, 0.95);
+    dbl(desc, P_DEPTH, "Depth", "Distance of the glass from the lens; the footage is at 1. Viewer: cyan bar.", gp, 0.15, 0.02, 0.6, 0.01, 0.95);
     for (const char* n : { P_TILT, P_TURN, P_ROLL }) {
         const char* label = n == std::string(P_TILT) ? "Tilt" : n == std::string(P_TURN) ? "Turn" : "Roll";
         const char* hint = n == std::string(P_TILT) ? "Rotate the glass up/down (degrees)."
@@ -986,7 +1141,7 @@ void FacetGlassFactory::describeInContext(ImageEffectDescriptor& desc, ContextEn
 
     // ---------------------------------------------------------------- Glass
     GroupParamDescriptor* gg = group(desc, "glassGroup", "Glass");
-    dbl(desc, P_IOR, "Strength (IOR)", "Index of refraction: how strongly the glass bends light.", gg, 1.55, 1.0,
+    dbl(desc, P_IOR, "Strength (IOR)", "Index of refraction: how strongly the glass bends light. Viewer: orange arc.", gg, 1.55, 1.0,
         2.5, 1.0, 4.0);
     dbl(desc, P_DISP, "Chromatic Aberration", "Spectral dispersion: rainbow edges.", gg, 0.4, 0.0, 1.5, 0.0, 5.0);
     dbl(desc, P_REFL, "Reflections", "Strength of reflections off the glass faces (1 = physical).", gg, 1.0, 0.0,
@@ -1000,8 +1155,8 @@ void FacetGlassFactory::describeInContext(ImageEffectDescriptor& desc, ContextEn
 
     // ---------------------------------------------------------------- Optics
     GroupParamDescriptor* go = group(desc, "opticsGroup", "Optics");
-    dbl(desc, P_FSTOP, "F-Stop", "Lens aperture: lower blurs the out-of-focus glass more.", go, 4.0, 0.95, 22.0, 0.5, 64.0);
-    dbl(desc, P_FOCUS, "Focus", "Focus distance: 0 = on the glass, 1 = on the footage.", go, 1.0, 0.0, 1.0, 0.0, 1.0);
+    dbl(desc, P_FSTOP, "F-Stop", "Lens aperture: lower blurs the out-of-focus glass more. Viewer: purple arc.", go, 4.0, 0.95, 22.0, 0.5, 64.0);
+    dbl(desc, P_FOCUS, "Focus", "Focus distance: 0 = on the glass, 1 = on the footage. Viewer: yellow arc.", go, 1.0, 0.0, 1.0, 0.0, 1.0);
     dbl(desc, P_GFOCUS, "Glass Focus",
         "Focus for what is seen through the glass (0 = glass, 1 = footage), e.g. a split diopter.", go, 1.0, 0.0, 1.0,
         0.0, 1.0);
