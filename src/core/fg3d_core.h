@@ -4,7 +4,8 @@
  * defines, before including this file:
  *   FG_DEVICE  function qualifier        FG_GLOBAL  buffer address space
  *   FG_PRIV    private pointer space     FG_SQRT FG_SIN FG_COS FG_ATAN2 FG_FLOOR
- *   FG_FABS FG_FMAX FG_FMIN FG_EXP FG_LOG  float math
+ *   FG_FABS FG_FMAX FG_FMIN               float math (exp/log/sin/cos are portable
+ *                                         implementations below, for bit-identical backends)
  *
  * Model. A pinhole-plus-aperture camera at the origin looks down +z. The footage
  * is a plane at z = 1 that exactly fills the frame (screen y in [-0.5, 0.5], x
@@ -51,7 +52,77 @@ FG_DEVICE fgv3 fgv_load(FG_GLOBAL const float* p) { return fgv(p[0], p[1], p[2])
 FG_DEVICE float fg3d_clampf(float v, float lo, float hi) { return FG_FMAX(lo, FG_FMIN(hi, v)); }
 FG_DEVICE int fg3d_clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 FG_DEVICE float fg3d_fract(float v) { return v - FG_FLOOR(v); }
-FG_DEVICE float fg3d_pow(float b, float e) { return b > 0.0f ? FG_EXP(e * FG_LOG(b)) : 0.0f; }
+/* Portable exp / log / sin / cos built only from +, -, *, / and floor, so every
+ * backend (CPU, CUDA, OpenCL, Metal) computes bit-identical results. Library
+ * versions differ in the last bits between platforms, which in a path tracer can
+ * flip a random reflect/refract choice and change a whole sample. */
+FG_DEVICE float fg3d_exp2i(int n)
+{
+  /* 2^n by binary powering (exact for normal results). */
+  float b = n < 0 ? 0.5f : 2.0f;
+  int k = n < 0 ? -n : n;
+  float r = 1.0f;
+  if (k > 140) k = 140;
+  while (k > 0) {
+    if ((k & 1) != 0) r *= b;
+    b *= b;
+    k >>= 1;
+  }
+  return r;
+}
+
+FG_DEVICE float fg3d_exp(float x)
+{
+  if (x > 88.0f) x = 88.0f;
+  if (x < -87.0f) return 0.0f;
+  float n = FG_FLOOR(x * 1.44269504f + 0.5f);
+  float r = (x - n * 0.693145752f) - n * 1.42860677e-6f;  /* ln2 split hi/lo */
+  float pr = 1.0f + r * (1.0f + r * (0.5f + r * (0.166666672f + r * (0.0416666679f + r * (0.00833333377f +
+             r * 0.00138888892f)))));
+  return pr * fg3d_exp2i((int)n);
+}
+
+FG_DEVICE float fg3d_log(float x)
+{
+  if (x <= 0.0f) return -87.0f;
+  int e = 0;
+  float m = x;
+  while (m >= 65536.0f) { m *= (1.0f / 65536.0f); e += 16; }
+  while (m < (1.0f / 65536.0f)) { m *= 65536.0f; e -= 16; }
+  while (m >= 1.41421356f) { m *= 0.5f; e += 1; }
+  while (m < 0.707106781f) { m *= 2.0f; e -= 1; }
+  float t = (m - 1.0f) / (m + 1.0f);
+  float t2 = t * t;
+  float sr = t * (2.0f + t2 * (0.666666667f + t2 * (0.4f + t2 * (0.285714286f + t2 * (0.222222222f +
+             t2 * 0.181818182f)))));
+  return (float)e * 0.693147181f + sr;
+}
+
+/* sin and cos for any x (range-reduced to [-pi/4, pi/4] around a quadrant). */
+FG_DEVICE float fg3d_sin_poly(float x)
+{
+  float x2 = x * x;
+  return x * (1.0f + x2 * (-0.166666667f + x2 * (0.00833333333f + x2 * (-0.000198412698f + x2 * 2.75573192e-6f))));
+}
+FG_DEVICE float fg3d_cos_poly(float x)
+{
+  float x2 = x * x;
+  return 1.0f + x2 * (-0.5f + x2 * (0.0416666667f + x2 * (-0.00138888889f + x2 * (2.48015873e-5f +
+         x2 * -2.75573192e-7f))));
+}
+FG_DEVICE void fg3d_sincos(float x, FG_PRIV float* sn, FG_PRIV float* cs)
+{
+  float q = FG_FLOOR(x * 0.636619772f + 0.5f);          /* nearest multiple of pi/2 */
+  float r = (x - q * 1.57079601f) - q * 3.13916473e-7f;  /* pi/2 split hi/lo */
+  int k = ((int)q) & 3;
+  float s0 = fg3d_sin_poly(r), c0 = fg3d_cos_poly(r);
+  if (k == 0) { *sn = s0; *cs = c0; }
+  else if (k == 1) { *sn = c0; *cs = -s0; }
+  else if (k == 2) { *sn = -s0; *cs = -c0; }
+  else { *sn = -c0; *cs = s0; }
+}
+
+FG_DEVICE float fg3d_pow(float b, float e) { return b > 0.0f ? fg3d_exp(e * fg3d_log(b)) : 0.0f; }
 
 /* ------------------------------------------------------------------ random */
 
@@ -71,27 +142,27 @@ FG_DEVICE float fg3d_decode(int cs, float x)
   if (cs == FG_CS_REC709) return x > 0.0f ? fg3d_pow(x, 2.4f) : x;
   if (cs == FG_CS_SRGB) return x <= 0.04045f ? x / 12.92f : fg3d_pow((x + 0.055f) / 1.055f, 2.4f);
   if (cs == FG_CS_SLOG3) {
-    if (x >= 171.2102946929f / 1023.0f) return FG_EXP(((x * 1023.0f - 420.0f) / 261.5f) * 2.302585093f) * 0.19f - 0.01f;
+    if (x >= 171.2102946929f / 1023.0f) return fg3d_exp(((x * 1023.0f - 420.0f) / 261.5f) * 2.302585093f) * 0.19f - 0.01f;
     return (x * 1023.0f - 95.0f) * 0.01125f / (171.2102946929f - 95.0f);
   }
   if (cs == FG_CS_LOGC3) {
-    if (x > 0.149658f) return (FG_EXP(((x - 0.385537f) / 0.247190f) * 2.302585093f) - 0.052272f) / 5.555556f;
+    if (x > 0.149658f) return (fg3d_exp(((x - 0.385537f) / 0.247190f) * 2.302585093f) - 0.052272f) / 5.555556f;
     return (x - 0.092809f) / 5.367655f;
   }
   if (cs == FG_CS_LOGC4) {
     /* a = (2^18 - 16) / 117.45, b = (1023 - 95) / 1023, c = 95 / 1023 */
     float a = 2231.826309f, b = 0.9071358749f, c = 0.0928641251f;
     float s = 0.1135972086f, t = -0.0180569961f;
-    if (x >= 0.0f) return (FG_EXP((14.0f * (x - c) / b + 6.0f) * 0.6931471806f) - 64.0f) / a;
+    if (x >= 0.0f) return (fg3d_exp((14.0f * (x - c) / b + 6.0f) * 0.6931471806f) - 64.0f) / a;
     return x * s + t;
   }
   if (cs == FG_CS_VLOG) {
     if (x < 0.181f) return (x - 0.125f) / 5.6f;
-    return FG_EXP(((x - 0.598206f) / 0.241514f) * 2.302585093f) - 0.00873f;
+    return fg3d_exp(((x - 0.598206f) / 0.241514f) * 2.302585093f) - 0.00873f;
   }
   if (cs == FG_CS_DAVINCI) {
     if (x <= 0.02740668f) return x / 10.44426855f;
-    return FG_EXP((x / 0.07329248f - 7.0f) * 0.6931471806f) - 0.0075f;
+    return fg3d_exp((x / 0.07329248f - 7.0f) * 0.6931471806f) - 0.0075f;
   }
   return x;
 }
@@ -101,11 +172,11 @@ FG_DEVICE float fg3d_encode(int cs, float y)
   if (cs == FG_CS_REC709) return y > 0.0f ? fg3d_pow(y, 1.0f / 2.4f) : y;
   if (cs == FG_CS_SRGB) return y <= 0.0031308f ? y * 12.92f : 1.055f * fg3d_pow(y, 1.0f / 2.4f) - 0.055f;
   if (cs == FG_CS_SLOG3) {
-    if (y >= 0.01125000f) return (420.0f + FG_LOG((y + 0.01f) / 0.19f) / 2.302585093f * 261.5f) / 1023.0f;
+    if (y >= 0.01125000f) return (420.0f + fg3d_log((y + 0.01f) / 0.19f) / 2.302585093f * 261.5f) / 1023.0f;
     return (y * (171.2102946929f - 95.0f) / 0.01125f + 95.0f) / 1023.0f;
   }
   if (cs == FG_CS_LOGC3) {
-    if (y > 0.010591f) return 0.247190f * FG_LOG(5.555556f * y + 0.052272f) / 2.302585093f + 0.385537f;
+    if (y > 0.010591f) return 0.247190f * fg3d_log(5.555556f * y + 0.052272f) / 2.302585093f + 0.385537f;
     return 5.367655f * y + 0.092809f;
   }
   if (cs == FG_CS_LOGC4) {
@@ -113,17 +184,17 @@ FG_DEVICE float fg3d_encode(int cs, float y)
     float s = 0.1135972086f, t = -0.0180569961f;
     if (y >= t) {
       float v = a * y + 64.0f;
-      return v > 0.0f ? (FG_LOG(v) / 0.6931471806f - 6.0f) / 14.0f * b + c : c;
+      return v > 0.0f ? (fg3d_log(v) / 0.6931471806f - 6.0f) / 14.0f * b + c : c;
     }
     return (y - t) / s;
   }
   if (cs == FG_CS_VLOG) {
     if (y < 0.01f) return 5.6f * y + 0.125f;
-    return 0.241514f * FG_LOG(y + 0.00873f) / 2.302585093f + 0.598206f;
+    return 0.241514f * fg3d_log(y + 0.00873f) / 2.302585093f + 0.598206f;
   }
   if (cs == FG_CS_DAVINCI) {
     if (y <= 0.00262409f) return y * 10.44426855f;
-    return (FG_LOG(y + 0.0075f) / 0.6931471806f + 7.0f) * 0.07329248f;
+    return (fg3d_log(y + 0.0075f) / 0.6931471806f + 7.0f) * 0.07329248f;
   }
   return y;
 }
@@ -299,7 +370,7 @@ FG_DEVICE float fg3d_fresnel(float cosi, float n1, float n2, FG_PRIV float* cost
 FG_DEVICE fgv3 fg3d_spectral_weight(float lam)
 {
   float r = (lam - 0.600f) / 0.050f, g = (lam - 0.540f) / 0.045f, b = (lam - 0.450f) / 0.040f;
-  return fgv(FG_EXP(-0.5f * r * r), FG_EXP(-0.5f * g * g), FG_EXP(-0.5f * b * b));
+  return fgv(fg3d_exp(-0.5f * r * r), fg3d_exp(-0.5f * g * g), fg3d_exp(-0.5f * b * b));
 }
 
 /* Source or refract-source image at normalised frame position. */
@@ -406,7 +477,9 @@ FG_DEVICE fgv4 fg3d_shade(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* sr
     float jy = fg3d_fract(o2 + fi * 0.5698402910f) - 0.5f;
     float ar = p->aperture * FG_SQRT(fg3d_fract(o3 + fi * 0.7548776662f));
     float at = 6.2831853f * fg3d_fract(o4 + fi * 0.5698402910f);
-    float ax = ar * FG_COS(at), ay = ar * FG_SIN(at);
+    float sa = 0.0f, ca = 1.0f;
+    fg3d_sincos(at, &sa, &ca);
+    float ax = ar * ca, ay = ar * sa;
     float px = ((fx + 0.5f + jx) / W - 0.5f) * aspect;
     float py = (fy + 0.5f + jy) / H - 0.5f;
 

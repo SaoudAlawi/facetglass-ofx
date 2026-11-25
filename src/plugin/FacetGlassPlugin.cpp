@@ -1,10 +1,10 @@
-// FacetGlass - OpenFX plugin (CPU render).
+// FacetGlass - OpenFX plugin.
 // SPDX-License-Identifier: MIT
 //
-// Ray-traced glass in front of the lens. All shading math lives in
-// src/core/fg_core.h; this file only describes the plugin, reads parameters,
-// converts them exactly like the Fuse reference (reference/fuse/FacetGlass.fuse,
-// Process()) and runs fg_shade over the render window.
+// Ray-traced solid glass in front of the lens. The shading maths lives in
+// src/core/fg3d_core.h; shapes, the BVH and the UI -> parameter conversion live in
+// src/host. This file describes the plugin, reads parameters, caches the scene and
+// runs the render on CUDA (when the host offers it) or on the CPU.
 
 #include <algorithm>
 #include <cfloat>
@@ -12,96 +12,84 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <mutex>
 
 #include "ofxsImageEffect.h"
 #include "ofxsMultiThread.h"
 #include "ofxsProcessing.h"
 
-#include "fg_backend_cpu.h"
+#include "fg3d_cpu.h"
+#ifdef FG_HAVE_CUDA
+#include "fg3d_cuda.h"
+#endif
 
 #define kPluginName "FacetGlass"
 #define kPluginGrouping "FacetGlass"
 #define kPluginDescription                                                                                   \
-    "Ray-traced glass held in front of the lens: prisms, ghost repeats, split and round diopters and "      \
-    "crystal facets, with lens-aperture depth of field, spectral dispersion and Fresnel reflections.\n"     \
+    "Ray-traced glass held in front of the lens: prisms, diopters, gems and crystals as solid 3D objects, " \
+    "with internal reflections, bevelled edges, dispersion, lens depth of field and virtual lights.\n"     \
     "Free and open source (MIT)."
 #define kPluginIdentifier "com.facetglass.FacetGlass"
 #define kPluginVersionMajor 1
-#define kPluginVersionMinor 0
-
-#define kSupportsTiles true
-#define kSupportsMultiResolution true
-#define kSupportsMultipleClipPARs false
+#define kPluginVersionMinor 1
 
 #define kClipRefract "RefractSource"
 
-// Parameter names (script names). These are stored in saved projects: never rename.
-#define kParamShape "shape"
-#define kParamCenter "center"
-#define kParamAngle "angle"
-#define kParamSize "size"
-#define kParamFacets "facets"
-#define kParamSymmetric "bothSides"
-#define kParamInner "clearCentre"
-#define kParamPrism "prismAngle"
-#define kParamPower "diopterPower"
-#define kParamIOR "ior"
-#define kParamDispersion "chromaticAberration"
-#define kParamSeed "seed"
-#define kParamFStop "fStop"
-#define kParamFocus "focus"
-#define kParamFocusD "diopterFocus"
-#define kParamGlassDist "glassDistance"
-#define kParamEdge "outsideFrame"
-#define kParamQuality "quality"
-#define kParamSamples "samples"
-#define kParamBoost "highlightBoost"
-#define kParamThreshold "highlightThreshold"
-#define kParamRefl "reflection"
-#define kParamLight "lightPosition"
-#define kParamLightSize "lightSize"
-#define kParamLightInt "lightIntensity"
-#define kParamWobble "wobble"
-#define kParamWobbleSpeed "wobbleSpeed"
-#define kParamMix "mix"
+// Parameter script names: stored in saved projects, never rename.
+#define P_SHAPE "shape"
+#define P_FACETS "facets"
+#define P_BOTH "bothSides"
+#define P_PRISM "prismAngle"
+#define P_CLEAR "clearCentre"
+#define P_POWER "diopterPower"
+#define P_THICK "thickness"
+#define P_DETAIL "detail"
+#define P_SEED "seed"
+#define P_CENTER "center"
+#define P_DEPTH "depth"
+#define P_TILT "tilt"
+#define P_TURN "turn"
+#define P_ROLL "roll"
+#define P_SIZE "size"
+#define P_IOR "ior"
+#define P_DISP "chromaticAberration"
+#define P_REFL "reflection"
+#define P_ROUGH "roughness"
+#define P_BEVEL "bevelWidth"
+#define P_BEVANG "bevelAngle"
+#define P_BOUNCES "bounceLimit"
+#define P_FSTOP "fStop"
+#define P_FOCUS "focus"
+#define P_GFOCUS "glassFocus"
+#define P_WORLD "outsideFrame"
+#define P_WBLUR "worldBlur"
+#define P_FEATHER "feather"
+#define P_WOBBLE "wobble"
+#define P_WSPEED "wobbleSpeed"
+#define P_BOOST "highlightBoost"
+#define P_THRESH "highlightThreshold"
+#define P_MIX "mix"
+#define P_CSPACE "inputColorSpace"
+#define P_QUALITY "quality"
+#define P_MINS "minSamples"
+#define P_MAXS "maxSamples"
+#define P_NOISE "noiseThreshold"
+#define kNumLights 2
+static const char* kLightPos[kNumLights] = { "light1Position", "light2Position" };
+static const char* kLightDepth[kNumLights] = { "light1Depth", "light2Depth" };
+static const char* kLightSize[kNumLights] = { "light1Size", "light2Size" };
+static const char* kLightKelvin[kNumLights] = { "light1Kelvin", "light2Kelvin" };
+static const char* kLightInt[kNumLights] = { "light1Intensity", "light2Intensity" };
 
 enum { kQualityDraft = 0, kQualityGood, kQualityFinal, kQualityCustom };
-static const int kQualitySamples[3] = { 8, 24, 64 };
 
 using namespace OFX;
 
-////////////////////////////////////////////////////////////////////////////////
-// Host-side conversions (same as the Fuse's Lua Process()).
-
 namespace {
-
-struct Wobble { double ox, oy, oa; };
-
-// Hand-held wobble from time in frames, 24 fps base. Matches wobble() in the Fuse.
-Wobble wobble(double t, int seed, double amount, double speed)
-{
-    Wobble w = { 0.0, 0.0, 0.0 };
-    if (amount <= 0.0) return w;
-    const double s = seed * 1.7319;
-    const double tt = t * speed / 24.0;
-    w.ox = amount * 0.03 * (std::sin(1.31 * tt + s) + 0.5 * std::sin(2.97 * tt + 2.1 * s));
-    w.oy = amount * 0.03 * (std::sin(1.07 * tt + 3.3 * s) + 0.5 * std::sin(2.41 * tt + 0.7 * s));
-    w.oa = amount * 6.0 * (std::sin(0.83 * tt + 5.1 * s) + 0.4 * std::sin(2.13 * tt + 1.3 * s));
-    return w;
-}
-
-double focusInv(double f, double zg)
-{
-    f = std::min(std::max(f, 0.0), 1.0);
-    return 1.0 + (1.0 / zg - 1.0) * (1.0 - f) * (1.0 - f);
-}
-
-double deg2rad(double d) { return d * 3.14159265358979323846 / 180.0; }
 
 int choiceAt(ChoiceParam* c, double t) { int v = 0; c->getValueAtTime(t, v); return v; }
 OfxPointD pointAt(Double2DParam* d, double t) { OfxPointD v; d->getValueAtTime(t, v.x, v.y); return v; }
 
-// Canonical coordinates -> pixel coordinates at the given render scale (enclosing).
 OfxRectI toPixelEnclosing(const OfxRectD& r, const OfxPointD& rs, double par)
 {
     OfxRectI p;
@@ -112,48 +100,43 @@ OfxRectI toPixelEnclosing(const OfxRectD& r, const OfxPointD& rs, double par)
     return p;
 }
 
-} // namespace
+bool sameShape(const fg3d::ShapeParams& a, const fg3d::ShapeParams& b)
+{
+    return a.shape == b.shape && a.facets == b.facets && a.bothSides == b.bothSides &&
+           a.prismAngleDeg == b.prismAngleDeg && a.clearCentre == b.clearCentre && a.power == b.power &&
+           a.thickness == b.thickness && a.detail == b.detail && a.seed == b.seed &&
+           a.worldScale == b.worldScale && a.depth == b.depth;
+}
+
+}  // namespace
 
 ////////////////////////////////////////////////////////////////////////////////
-// Processor: runs fg_shade on each pixel of the render window.
+// CPU processor: runs fg3d_shade over the render window on the host's threads.
 
-class FacetGlassProcessor : public ImageProcessor
+class CpuProcessor : public ImageProcessor
 {
 public:
-    explicit FacetGlassProcessor(ImageEffect& effect)
-        : ImageProcessor(effect), _src(nullptr), _gls(nullptr)
-    {
-        std::memset(&_params, 0, sizeof _params);
-    }
-
-    void setup(const FGParams& p, const float* src, const float* gls)
-    {
-        _params = p;
-        _src = src;
-        _gls = gls;
-    }
+    CpuProcessor(ImageEffect& e, const FG3DParams& p, const float* src, const float* gls,
+                 const fg3d::SceneBuffers& s)
+        : ImageProcessor(e), _p(p), _src(src), _gls(gls), _s(s) {}
 
     void multiThreadProcessImages(OfxRectI win) override
     {
-        const FGParams p = _params; // private copy, same as the GPU kernels will do
         for (int y = win.y1; y < win.y2; ++y) {
             if (_effect.abort()) break;
-            float* d = static_cast<float*>(_dstImg->getPixelAddress(win.x1, y));
-            for (int x = win.x1; x < win.x2; ++x, d += 4) {
-                const fg4 c = fg_shade(&p, _src, _gls, x, y);
-                d[0] = c.x; d[1] = c.y; d[2] = c.z; d[3] = c.w;
-            }
+            fg3d::shadeCPU(_p, _src, _gls, _s, win.x1, win.x2, y, y + 1,
+                           [&](int yy) { return static_cast<float*>(_dstImg->getPixelAddress(win.x1, yy)); });
         }
     }
 
 private:
-    FGParams _params;
+    FG3DParams _p;
     const float* _src;
     const float* _gls;
+    const fg3d::SceneBuffers& _s;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
-// The effect instance.
 
 class FacetGlassPlugin : public ImageEffect
 {
@@ -167,220 +150,295 @@ public:
     void changedParam(const InstanceChangedArgs& args, const std::string& paramName) override;
 
 private:
-    void updateSamplesVisibility();
-    bool refractConnected() const { return _refractClip && _refractClip->isConnected(); }
+    void readUI(double t, fg3d::UIParams& ui);
+    std::shared_ptr<const fg3d::SceneBuffers> scene(const fg3d::UIParams& ui);
+    void updateVisibility();
+    bool refractConnected() const { return _refract && _refract->isConnected(); }
 
-    Clip* _dstClip;
-    Clip* _srcClip;
-    Clip* _refractClip; // only in the General context
+    Clip *_dst, *_src, *_refract;
 
-    ChoiceParam* _shape;
+    ChoiceParam *_shape, *_world, *_cspace, *_quality;
+    IntParam *_facets, *_detail, *_seed, *_bounces, *_minS, *_maxS;
+    BooleanParam* _both;
+    DoubleParam *_prism, *_clear, *_power, *_thick, *_depth, *_tilt, *_turn, *_roll, *_size, *_ior, *_disp, *_refl,
+        *_rough, *_bevel, *_bevAng, *_fstop, *_focus, *_gfocus, *_wblur, *_feather, *_wobble, *_wspeed, *_boost,
+        *_thresh, *_mix, *_noise;
     Double2DParam* _center;
-    DoubleParam* _angle;
-    DoubleParam* _size;
-    IntParam* _facets;
-    BooleanParam* _symmetric;
-    DoubleParam* _inner;
-    DoubleParam* _prism;
-    DoubleParam* _power;
-    DoubleParam* _ior;
-    DoubleParam* _dispersion;
-    IntParam* _seed;
-    DoubleParam* _fstop;
-    DoubleParam* _focus;
-    DoubleParam* _focusD;
-    DoubleParam* _glassDist;
-    ChoiceParam* _edge;
-    ChoiceParam* _quality;
-    IntParam* _samples;
-    DoubleParam* _boost;
-    DoubleParam* _threshold;
-    DoubleParam* _refl;
-    Double2DParam* _light;
-    DoubleParam* _lightSize;
-    DoubleParam* _lightInt;
-    DoubleParam* _wobble;
-    DoubleParam* _wobbleSpeed;
-    DoubleParam* _mix;
+    Double2DParam* _lpos[kNumLights];
+    DoubleParam *_ldepth[kNumLights], *_lsize[kNumLights], *_lkelvin[kNumLights], *_lint[kNumLights];
+
+    std::mutex _sceneMutex;
+    fg3d::ShapeParams _sceneKey;
+    float _sceneBevel = -1.0f;
+    std::shared_ptr<const fg3d::SceneBuffers> _scene;
 };
 
-FacetGlassPlugin::FacetGlassPlugin(OfxImageEffectHandle handle)
-    : ImageEffect(handle), _refractClip(nullptr)
+FacetGlassPlugin::FacetGlassPlugin(OfxImageEffectHandle handle) : ImageEffect(handle), _refract(nullptr)
 {
-    _dstClip = fetchClip(kOfxImageEffectOutputClipName);
-    _srcClip = fetchClip(kOfxImageEffectSimpleSourceClipName);
-    if (getContext() == eContextGeneral) _refractClip = fetchClip(kClipRefract);
+    _dst = fetchClip(kOfxImageEffectOutputClipName);
+    _src = fetchClip(kOfxImageEffectSimpleSourceClipName);
+    if (getContext() == eContextGeneral) _refract = fetchClip(kClipRefract);
 
-    _shape = fetchChoiceParam(kParamShape);
-    _center = fetchDouble2DParam(kParamCenter);
-    _angle = fetchDoubleParam(kParamAngle);
-    _size = fetchDoubleParam(kParamSize);
-    _facets = fetchIntParam(kParamFacets);
-    _symmetric = fetchBooleanParam(kParamSymmetric);
-    _inner = fetchDoubleParam(kParamInner);
-    _prism = fetchDoubleParam(kParamPrism);
-    _power = fetchDoubleParam(kParamPower);
-    _ior = fetchDoubleParam(kParamIOR);
-    _dispersion = fetchDoubleParam(kParamDispersion);
-    _seed = fetchIntParam(kParamSeed);
-    _fstop = fetchDoubleParam(kParamFStop);
-    _focus = fetchDoubleParam(kParamFocus);
-    _focusD = fetchDoubleParam(kParamFocusD);
-    _glassDist = fetchDoubleParam(kParamGlassDist);
-    _edge = fetchChoiceParam(kParamEdge);
-    _quality = fetchChoiceParam(kParamQuality);
-    _samples = fetchIntParam(kParamSamples);
-    _boost = fetchDoubleParam(kParamBoost);
-    _threshold = fetchDoubleParam(kParamThreshold);
-    _refl = fetchDoubleParam(kParamRefl);
-    _light = fetchDouble2DParam(kParamLight);
-    _lightSize = fetchDoubleParam(kParamLightSize);
-    _lightInt = fetchDoubleParam(kParamLightInt);
-    _wobble = fetchDoubleParam(kParamWobble);
-    _wobbleSpeed = fetchDoubleParam(kParamWobbleSpeed);
-    _mix = fetchDoubleParam(kParamMix);
-
-    updateSamplesVisibility();
+    _shape = fetchChoiceParam(P_SHAPE);
+    _world = fetchChoiceParam(P_WORLD);
+    _cspace = fetchChoiceParam(P_CSPACE);
+    _quality = fetchChoiceParam(P_QUALITY);
+    _facets = fetchIntParam(P_FACETS);
+    _detail = fetchIntParam(P_DETAIL);
+    _seed = fetchIntParam(P_SEED);
+    _bounces = fetchIntParam(P_BOUNCES);
+    _minS = fetchIntParam(P_MINS);
+    _maxS = fetchIntParam(P_MAXS);
+    _both = fetchBooleanParam(P_BOTH);
+    _prism = fetchDoubleParam(P_PRISM);
+    _clear = fetchDoubleParam(P_CLEAR);
+    _power = fetchDoubleParam(P_POWER);
+    _thick = fetchDoubleParam(P_THICK);
+    _depth = fetchDoubleParam(P_DEPTH);
+    _tilt = fetchDoubleParam(P_TILT);
+    _turn = fetchDoubleParam(P_TURN);
+    _roll = fetchDoubleParam(P_ROLL);
+    _size = fetchDoubleParam(P_SIZE);
+    _ior = fetchDoubleParam(P_IOR);
+    _disp = fetchDoubleParam(P_DISP);
+    _refl = fetchDoubleParam(P_REFL);
+    _rough = fetchDoubleParam(P_ROUGH);
+    _bevel = fetchDoubleParam(P_BEVEL);
+    _bevAng = fetchDoubleParam(P_BEVANG);
+    _fstop = fetchDoubleParam(P_FSTOP);
+    _focus = fetchDoubleParam(P_FOCUS);
+    _gfocus = fetchDoubleParam(P_GFOCUS);
+    _wblur = fetchDoubleParam(P_WBLUR);
+    _feather = fetchDoubleParam(P_FEATHER);
+    _wobble = fetchDoubleParam(P_WOBBLE);
+    _wspeed = fetchDoubleParam(P_WSPEED);
+    _boost = fetchDoubleParam(P_BOOST);
+    _thresh = fetchDoubleParam(P_THRESH);
+    _mix = fetchDoubleParam(P_MIX);
+    _noise = fetchDoubleParam(P_NOISE);
+    _center = fetchDouble2DParam(P_CENTER);
+    for (int i = 0; i < kNumLights; ++i) {
+        _lpos[i] = fetchDouble2DParam(kLightPos[i]);
+        _ldepth[i] = fetchDoubleParam(kLightDepth[i]);
+        _lsize[i] = fetchDoubleParam(kLightSize[i]);
+        _lkelvin[i] = fetchDoubleParam(kLightKelvin[i]);
+        _lint[i] = fetchDoubleParam(kLightInt[i]);
+    }
+    updateVisibility();
 }
 
-void FacetGlassPlugin::updateSamplesVisibility()
+void FacetGlassPlugin::updateVisibility()
 {
     const bool custom = choiceAt(_quality, 0.0) == kQualityCustom;
-    _samples->setIsSecret(!custom);
-    _samples->setEnabled(custom);
+    _minS->setIsSecret(!custom);
+    _maxS->setIsSecret(!custom);
+    _noise->setIsSecret(!custom);
+    const int s = choiceAt(_shape, 0.0);
+    const bool facets = s == fg3d::kFacetPlate || s == fg3d::kRadialPrism || s == fg3d::kCrystalCluster;
+    const bool prism = s == fg3d::kFacetPlate || s == fg3d::kRadialPrism;
+    const bool lens = s == fg3d::kSplitDiopter || s == fg3d::kRoundDiopter;
+    _facets->setEnabled(facets);
+    _both->setEnabled(s == fg3d::kFacetPlate);
+    _prism->setEnabled(prism);
+    _clear->setEnabled(s == fg3d::kRadialPrism);
+    _power->setEnabled(lens);
+    _detail->setEnabled(s == fg3d::kGeoSphere);
+    _thick->setEnabled(s == fg3d::kFacetPlate || s == fg3d::kRadialPrism || s == fg3d::kWedgePrism ||
+                       s == fg3d::kBox || lens);
 }
 
-void FacetGlassPlugin::changedParam(const InstanceChangedArgs& /*args*/, const std::string& paramName)
+void FacetGlassPlugin::changedParam(const InstanceChangedArgs&, const std::string& name)
 {
-    if (paramName == kParamQuality) updateSamplesVisibility();
+    if (name == P_QUALITY || name == P_SHAPE) updateVisibility();
+}
+
+void FacetGlassPlugin::readUI(double t, fg3d::UIParams& ui)
+{
+    ui.shape.shape = choiceAt(_shape, t);
+    ui.shape.facets = _facets->getValueAtTime(t);
+    ui.shape.bothSides = _both->getValueAtTime(t);
+    ui.shape.prismAngleDeg = (float)_prism->getValueAtTime(t);
+    ui.shape.clearCentre = (float)_clear->getValueAtTime(t);
+    ui.shape.power = (float)_power->getValueAtTime(t);
+    ui.shape.thickness = (float)_thick->getValueAtTime(t);
+    ui.shape.detail = _detail->getValueAtTime(t);
+    ui.seed = ui.shape.seed = _seed->getValueAtTime(t);
+    const OfxPointD c = pointAt(_center, t);
+    ui.centerX = c.x; ui.centerY = c.y;
+    ui.depth = _depth->getValueAtTime(t);
+    ui.rotX = _tilt->getValueAtTime(t);
+    ui.rotY = _turn->getValueAtTime(t);
+    ui.rotZ = _roll->getValueAtTime(t);
+    ui.size = _size->getValueAtTime(t);
+    ui.ior = _ior->getValueAtTime(t);
+    ui.dispersion = _disp->getValueAtTime(t);
+    ui.reflection = _refl->getValueAtTime(t);
+    ui.roughness = _rough->getValueAtTime(t);
+    ui.bevelWidth = _bevel->getValueAtTime(t);
+    ui.bevelAngle = _bevAng->getValueAtTime(t);
+    ui.maxBounces = _bounces->getValueAtTime(t);
+    ui.fstop = _fstop->getValueAtTime(t);
+    ui.focus = _focus->getValueAtTime(t);
+    ui.glassFocus = _gfocus->getValueAtTime(t);
+    ui.worldMode = choiceAt(_world, t);
+    ui.worldBlur = _wblur->getValueAtTime(t);
+    ui.feather = _feather->getValueAtTime(t);
+    ui.wobble = _wobble->getValueAtTime(t);
+    ui.wobbleSpeed = _wspeed->getValueAtTime(t);
+    ui.boost = _boost->getValueAtTime(t);
+    ui.threshold = _thresh->getValueAtTime(t);
+    ui.mix = _mix->getValueAtTime(t);
+    ui.colorSpace = choiceAt(_cspace, t);
+    switch (choiceAt(_quality, t)) {
+    case kQualityDraft: ui.minSamples = 4; ui.maxSamples = 8; ui.noiseThreshold = 0.05; break;
+    case kQualityGood: ui.minSamples = 12; ui.maxSamples = 48; ui.noiseThreshold = 0.03; break;
+    case kQualityFinal: ui.minSamples = 48; ui.maxSamples = 384; ui.noiseThreshold = 0.008; break;
+    default:
+        ui.minSamples = _minS->getValueAtTime(t);
+        ui.maxSamples = _maxS->getValueAtTime(t);
+        ui.noiseThreshold = _noise->getValueAtTime(t);
+    }
+    ui.numLights = 0;
+    for (int i = 0; i < kNumLights; ++i) {
+        fg3d::UIParams::Light& L = ui.lights[ui.numLights];
+        const OfxPointD lp = pointAt(_lpos[i], t);
+        L.x = lp.x; L.y = lp.y;
+        L.depth = _ldepth[i]->getValueAtTime(t);
+        L.size = _lsize[i]->getValueAtTime(t);
+        L.kelvin = _lkelvin[i]->getValueAtTime(t);
+        L.intensity = _lint[i]->getValueAtTime(t);
+        if (L.intensity > 0) ++ui.numLights;
+    }
+    ui.shape.worldScale = (float)fg3d::objectScale(ui);
+    ui.shape.depth = (float)ui.depth;
+    // Only lenses depend on scale and depth: keep other shapes' cache keys stable.
+    if (ui.shape.shape != fg3d::kSplitDiopter && ui.shape.shape != fg3d::kRoundDiopter) {
+        ui.shape.worldScale = 0.0f;
+        ui.shape.depth = 0.0f;
+    }
+}
+
+std::shared_ptr<const fg3d::SceneBuffers> FacetGlassPlugin::scene(const fg3d::UIParams& ui)
+{
+    std::lock_guard<std::mutex> lock(_sceneMutex);
+    if (!_scene || !sameShape(_sceneKey, ui.shape) || _sceneBevel != (float)ui.bevelAngle) {
+        auto s = std::make_shared<fg3d::SceneBuffers>();
+        fg3d::buildScene(fg3d::makeShape(ui.shape), (float)ui.bevelAngle, *s);
+        _scene = s;
+        _sceneKey = ui.shape;
+        _sceneBevel = (float)ui.bevelAngle;
+    }
+    return _scene;
 }
 
 bool FacetGlassPlugin::isIdentity(const IsIdentityArguments& args, Clip*& identityClip, double& identityTime)
 {
     if (_mix->getValueAtTime(args.time) == 0.0) {
-        identityClip = _srcClip;
+        identityClip = _src;
         identityTime = args.time;
         return true;
     }
     return false;
 }
 
-// The output covers exactly the source frame (an optional Refract Source must not enlarge it).
 bool FacetGlassPlugin::getRegionOfDefinition(const RegionOfDefinitionArguments& args, OfxRectD& rod)
 {
-    rod = _srcClip->getRegionOfDefinition(args.time);
+    rod = _src->getRegionOfDefinition(args.time);
     return true;
 }
 
-// Refracted rays can land anywhere in the frame, so every render needs the whole source.
+// Rays can land anywhere in the frame (and the world blur reads all of it).
 void FacetGlassPlugin::getRegionsOfInterest(const RegionsOfInterestArguments& args, RegionOfInterestSetter& rois)
 {
-    rois.setRegionOfInterest(*_srcClip, _srcClip->getRegionOfDefinition(args.time));
-    if (refractConnected())
-        rois.setRegionOfInterest(*_refractClip, _refractClip->getRegionOfDefinition(args.time));
+    rois.setRegionOfInterest(*_src, _src->getRegionOfDefinition(args.time));
+    if (refractConnected()) rois.setRegionOfInterest(*_refract, _refract->getRegionOfDefinition(args.time));
 }
 
 void FacetGlassPlugin::render(const RenderArguments& args)
 {
-    if (_dstClip->getPixelDepth() != eBitDepthFloat || _dstClip->getPixelComponents() != ePixelComponentRGBA)
+    if (_dst->getPixelDepth() != eBitDepthFloat || _dst->getPixelComponents() != ePixelComponentRGBA)
         throwSuiteStatusException(kOfxStatErrUnsupported);
-
     const double t = args.time;
-    std::unique_ptr<Image> dst(_dstClip->fetchImage(t));
-    std::unique_ptr<Image> src(_srcClip->fetchImage(t));
+    std::unique_ptr<Image> dst(_dst->fetchImage(t));
+    std::unique_ptr<Image> src(_src->fetchImage(t));
     if (!dst || !src) throwSuiteStatusException(kOfxStatFailed);
     if (src->getPixelDepth() != eBitDepthFloat || src->getPixelComponents() != ePixelComponentRGBA)
         throwSuiteStatusException(kOfxStatErrImageFormat);
-
     std::unique_ptr<Image> gls;
     if (refractConnected()) {
-        gls.reset(_refractClip->fetchImage(t));
+        gls.reset(_refract->fetchImage(t));
         if (gls && (gls->getPixelDepth() != eBitDepthFloat || gls->getPixelComponents() != ePixelComponentRGBA))
             throwSuiteStatusException(kOfxStatErrImageFormat);
     }
-    const Image* glsImg = gls ? gls.get() : src.get();
 
-    FGParams p;
-    std::memset(&p, 0, sizeof p);
-
-    // Frame: source RoD in pixels at the current render scale.
-    const OfxRectI frame = toPixelEnclosing(_srcClip->getRegionOfDefinition(t), args.renderScale,
-                                            _srcClip->getPixelAspectRatio());
-    p.frameX = (float)frame.x1;
-    p.frameY = (float)frame.y1;
-    p.frameW = (float)(frame.x2 - frame.x1);
-    p.frameH = (float)(frame.y2 - frame.y1);
-    if (p.frameW < 1.0f || p.frameH < 1.0f) throwSuiteStatusException(kOfxStatFailed);
-
-    // Image layouts. rowBytes may be negative; the base is pixel (x1, y1).
-    const OfxRectI sb = src->getBounds();
-    const OfxRectI gb = glsImg->getBounds();
-    if (sb.x2 <= sb.x1 || sb.y2 <= sb.y1 || gb.x2 <= gb.x1 || gb.y2 <= gb.y1)
-        throwSuiteStatusException(kOfxStatFailed);
-    p.srcX1 = sb.x1; p.srcY1 = sb.y1; p.srcW = sb.x2 - sb.x1; p.srcH = sb.y2 - sb.y1;
-    p.srcStride = src->getRowBytes() / 4;
-    p.glsX1 = gb.x1; p.glsY1 = gb.y1; p.glsW = gb.x2 - gb.x1; p.glsH = gb.y2 - gb.y1;
-    p.glsStride = glsImg->getRowBytes() / 4;
-    p.useSource = gls ? 1 : 0;
-    // Refract Source frame: its own RoD, so a different resolution maps by normalised position.
+    const OfxRectI frame = toPixelEnclosing(_src->getRegionOfDefinition(t), args.renderScale, _src->getPixelAspectRatio());
+    const int fw = frame.x2 - frame.x1, fh = frame.y2 - frame.y1;
+    if (fw < 1 || fh < 1) throwSuiteStatusException(kOfxStatFailed);
     OfxRectI gframe = frame;
-    if (gls) gframe = toPixelEnclosing(_refractClip->getRegionOfDefinition(t), args.renderScale,
-                                       _refractClip->getPixelAspectRatio());
-    p.glsFrameX = (float)gframe.x1;
-    p.glsFrameY = (float)gframe.y1;
-    p.glsFrameW = (float)std::max(gframe.x2 - gframe.x1, 1);
-    p.glsFrameH = (float)std::max(gframe.y2 - gframe.y1, 1);
-    const float* srcBase = static_cast<const float*>(src->getPixelAddress(sb.x1, sb.y1));
-    const float* glsBase = static_cast<const float*>(glsImg->getPixelAddress(gb.x1, gb.y1));
+    if (gls) gframe = toPixelEnclosing(_refract->getRegionOfDefinition(t), args.renderScale, _refract->getPixelAspectRatio());
 
-    // Parameters, converted like the Fuse.
-    const double zg = std::max(_glassDist->getValueAtTime(t), 0.005);
-    const double fstop = std::max(_fstop->getValueAtTime(t), 0.5);
-    const int quality = choiceAt(_quality, t);
-    const int samples = (quality >= 0 && quality < 3) ? kQualitySamples[quality] : _samples->getValueAtTime(t);
-    const int seed = _seed->getValueAtTime(t);
-    const Wobble w = wobble(t, seed, _wobble->getValueAtTime(t), _wobbleSpeed->getValueAtTime(t));
-    const OfxPointD center = pointAt(_center, t);
-    const OfxPointD light = pointAt(_light, t);
+    fg3d::UIParams ui;
+    readUI(t, ui);
+    std::shared_ptr<const fg3d::SceneBuffers> sc = scene(ui);
+    FG3DParams p;
+    fg3d::makeParams(ui, (float)frame.x1, (float)frame.y1, (float)fw, (float)fh, t, *sc, p);
 
-    p.shape = choiceAt(_shape, t);
-    p.facets = _facets->getValueAtTime(t);
-    p.symmetric = _symmetric->getValueAtTime(t) ? 1 : 0;
-    p.samples = std::max(samples, 1);
-    p.edgeMode = choiceAt(_edge, t);
-    p.seed = seed;
-    p.centerX = (float)(center.x + w.ox);
-    p.centerY = (float)(center.y + w.oy);
-    p.angle = (float)deg2rad(_angle->getValueAtTime(t) + w.oa);
-    p.size = (float)std::max(_size->getValueAtTime(t), 0.01);
-    p.inner = (float)_inner->getValueAtTime(t);
-    p.prism = (float)deg2rad(_prism->getValueAtTime(t));
-    p.power = (float)_power->getValueAtTime(t);
-    p.ior = (float)_ior->getValueAtTime(t);
-    p.dispersion = (float)_dispersion->getValueAtTime(t);
-    p.aperture = (float)(zg * 0.3 / fstop);
-    p.focusInv = (float)focusInv(_focus->getValueAtTime(t), zg);
-    p.focusInvD = (float)focusInv(_focusD->getValueAtTime(t), zg);
-    p.glassDist = (float)zg;
-    p.boost = (float)_boost->getValueAtTime(t);
-    p.threshold = (float)_threshold->getValueAtTime(t);
-    p.refl = (float)_refl->getValueAtTime(t);
-    p.lightX = (float)light.x;
-    p.lightY = (float)light.y;
-    p.lightSize = (float)_lightSize->getValueAtTime(t);
-    p.lightInt = (float)_lightInt->getValueAtTime(t);
-    p.mix = (float)_mix->getValueAtTime(t);
+    const OfxRectI sb = src->getBounds();
+    const int srcStride = src->getRowBytes() / 4;
 
-    FacetGlassProcessor proc(*this);
+#ifdef FG_HAVE_CUDA
+    if (args.isEnabledCudaRender) {
+        fg3d::CudaFrame f;
+        f.stream = args.pCudaStream;
+        f.src.data = static_cast<const float*>(src->getPixelData());
+        f.src.x1 = sb.x1; f.src.y1 = sb.y1; f.src.w = sb.x2 - sb.x1; f.src.h = sb.y2 - sb.y1; f.src.stride = srcStride;
+        if (gls) {
+            const OfxRectI gb = gls->getBounds();
+            f.gls.data = static_cast<const float*>(gls->getPixelData());
+            f.gls.x1 = gb.x1; f.gls.y1 = gb.y1; f.gls.w = gb.x2 - gb.x1; f.gls.h = gb.y2 - gb.y1;
+            f.gls.stride = gls->getRowBytes() / 4;
+            f.glsFrameX = gframe.x1; f.glsFrameY = gframe.y1;
+            f.glsFrameW = gframe.x2 - gframe.x1; f.glsFrameH = gframe.y2 - gframe.y1;
+        }
+        f.frameX = frame.x1; f.frameY = frame.y1; f.frameW = fw; f.frameH = fh;
+        const OfxRectI db = dst->getBounds();
+        f.dst = static_cast<float*>(dst->getPixelData());
+        f.dstX1 = db.x1; f.dstY1 = db.y1; f.dstStride = dst->getRowBytes() / 4;
+        f.winX1 = args.renderWindow.x1; f.winY1 = args.renderWindow.y1;
+        f.winX2 = args.renderWindow.x2; f.winY2 = args.renderWindow.y2;
+        if (const char* err = fg3d::renderCUDA(f, p, *sc)) {
+            setPersistentMessage(Message::eMessageError, "", std::string("FacetGlass CUDA: ") + err);
+            throwSuiteStatusException(kOfxStatFailed);
+        }
+        return;
+    }
+#endif
+    if (args.isEnabledCudaRender || args.isEnabledOpenCLRender || args.isEnabledMetalRender)
+        throwSuiteStatusException(kOfxStatErrUnsupported);
+
+    // CPU: linear pyramids for the source (and refract source), then shade.
+    std::vector<float> srcPyr, glsPyr;
+    int levels = 0, glevels = 0;
+    fg3d::buildPyramidCPU(static_cast<const float*>(src->getPixelAddress(sb.x1, sb.y1)), sb.x1, sb.y1, sb.x2 - sb.x1,
+                          sb.y2 - sb.y1, srcStride, frame.x1, frame.y1, fw, fh, ui.colorSpace, srcPyr, levels);
+    p.srcW = fw; p.srcH = fh; p.srcLevels = levels;
+    p.glsW = fw; p.glsH = fh; p.glsLevels = levels; p.useSource = 0;
+    if (gls) {
+        const OfxRectI gb = gls->getBounds();
+        const int gw = gframe.x2 - gframe.x1, gh = gframe.y2 - gframe.y1;
+        fg3d::buildPyramidCPU(static_cast<const float*>(gls->getPixelAddress(gb.x1, gb.y1)), gb.x1, gb.y1,
+                              gb.x2 - gb.x1, gb.y2 - gb.y1, gls->getRowBytes() / 4, gframe.x1, gframe.y1, gw, gh,
+                              ui.colorSpace, glsPyr, glevels);
+        p.glsW = gw; p.glsH = gh; p.glsLevels = glevels; p.useSource = 1;
+    }
+    CpuProcessor proc(*this, p, srcPyr.data(), gls ? glsPyr.data() : srcPyr.data(), *sc);
     proc.setDstImg(dst.get());
-    proc.setGPURenderArgs(args);
     proc.setRenderWindow(args.renderWindow);
-    proc.setup(p, srcBase, glsBase);
     proc.process();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Factory.
+// Factory
 
 class FacetGlassFactory : public PluginFactoryHelper<FacetGlassFactory>
 {
@@ -388,7 +446,7 @@ public:
     FacetGlassFactory() : PluginFactoryHelper<FacetGlassFactory>(kPluginIdentifier, kPluginVersionMajor, kPluginVersionMinor) {}
     void describe(ImageEffectDescriptor& desc) override;
     void describeInContext(ImageEffectDescriptor& desc, ContextEnum context) override;
-    ImageEffect* createInstance(OfxImageEffectHandle handle, ContextEnum context) override;
+    ImageEffect* createInstance(OfxImageEffectHandle handle, ContextEnum) override { return new FacetGlassPlugin(handle); }
 };
 
 void FacetGlassFactory::describe(ImageEffectDescriptor& desc)
@@ -396,192 +454,223 @@ void FacetGlassFactory::describe(ImageEffectDescriptor& desc)
     desc.setLabels(kPluginName, kPluginName, kPluginName);
     desc.setPluginGrouping(kPluginGrouping);
     desc.setPluginDescription(kPluginDescription);
-
     desc.addSupportedContext(eContextFilter);
     desc.addSupportedContext(eContextGeneral);
     desc.addSupportedBitDepth(eBitDepthFloat);
-
     desc.setSingleInstance(false);
     desc.setHostFrameThreading(false);
-    desc.setSupportsMultiResolution(kSupportsMultiResolution);
-    desc.setSupportsTiles(kSupportsTiles);
+    desc.setSupportsMultiResolution(true);
+    desc.setSupportsTiles(true);
     desc.setTemporalClipAccess(false);
     desc.setRenderTwiceAlways(false);
-    desc.setSupportsMultipleClipPARs(kSupportsMultipleClipPARs);
+    desc.setSupportsMultipleClipPARs(false);
     desc.setRenderThreadSafety(eRenderFullySafe);
-    // GPU backends (CUDA/OpenCL/Metal) are not implemented yet: CPU only for now.
+#ifdef FG_HAVE_CUDA
+    desc.setSupportsCudaRender(true);
+    desc.setSupportsCudaStream(true);
+#endif
 }
 
 namespace {
 
 PageParamDescriptor* g_page = nullptr;
 
-GroupParamDescriptor* defineGroup(ImageEffectDescriptor& desc, const char* name, const char* label)
+GroupParamDescriptor* group(ImageEffectDescriptor& d, const char* name, const char* label, bool open = true)
 {
-    GroupParamDescriptor* g = desc.defineGroupParam(name);
+    GroupParamDescriptor* g = d.defineGroupParam(name);
     g->setLabels(label, label, label);
-    g->setOpen(true);
+    g->setOpen(open);
     if (g_page) g_page->addChild(*g);
     return g;
 }
 
 template <class T>
-T* finish(T* param, const char* label, const char* hint, GroupParamDescriptor* group)
+T* finish(T* p, const char* label, const char* hint, GroupParamDescriptor* g)
 {
-    param->setLabels(label, label, label);
-    param->setHint(hint);
-    param->setParent(*group);
-    param->setAnimates(true);
-    if (g_page) g_page->addChild(*param);
-    return param;
+    p->setLabels(label, label, label);
+    p->setHint(hint);
+    p->setParent(*g);
+    if (g_page) g_page->addChild(*p);
+    return p;
 }
 
-DoubleParamDescriptor* defineDouble(ImageEffectDescriptor& desc, const char* name, const char* label, const char* hint,
-                                    GroupParamDescriptor* group, double def, double dispMin, double dispMax,
-                                    double min = -DBL_MAX, double max = DBL_MAX)
+DoubleParamDescriptor* dbl(ImageEffectDescriptor& d, const char* name, const char* label, const char* hint,
+                           GroupParamDescriptor* g, double def, double dmin, double dmax, double mn = -DBL_MAX,
+                           double mx = DBL_MAX)
 {
-    DoubleParamDescriptor* p = desc.defineDoubleParam(name);
+    DoubleParamDescriptor* p = d.defineDoubleParam(name);
     p->setDefault(def);
-    p->setRange(min, max);
-    p->setDisplayRange(dispMin, dispMax);
-    p->setIncrement((dispMax - dispMin) / 100.0);
+    p->setRange(mn, mx);
+    p->setDisplayRange(dmin, dmax);
+    p->setIncrement((dmax - dmin) / 100.0);
     p->setDigits(3);
-    return finish(p, label, hint, group);
+    return finish(p, label, hint, g);
 }
 
-IntParamDescriptor* defineInt(ImageEffectDescriptor& desc, const char* name, const char* label, const char* hint,
-                              GroupParamDescriptor* group, int def, int dispMin, int dispMax,
-                              int min = INT_MIN, int max = INT_MAX)
+IntParamDescriptor* intp(ImageEffectDescriptor& d, const char* name, const char* label, const char* hint,
+                         GroupParamDescriptor* g, int def, int dmin, int dmax, int mn, int mx)
 {
-    IntParamDescriptor* p = desc.defineIntParam(name);
+    IntParamDescriptor* p = d.defineIntParam(name);
     p->setDefault(def);
-    p->setRange(min, max);
-    p->setDisplayRange(dispMin, dispMax);
-    return finish(p, label, hint, group);
+    p->setRange(mn, mx);
+    p->setDisplayRange(dmin, dmax);
+    return finish(p, label, hint, g);
 }
 
-// Normalised 0..1 point (y up), stored as plain values so it is resolution-independent.
-Double2DParamDescriptor* definePoint(ImageEffectDescriptor& desc, const char* name, const char* label, const char* hint,
-                                     GroupParamDescriptor* group, double dx, double dy)
+Double2DParamDescriptor* point(ImageEffectDescriptor& d, const char* name, const char* label, const char* hint,
+                               GroupParamDescriptor* g, double x, double y)
 {
-    Double2DParamDescriptor* p = desc.defineDouble2DParam(name);
-    p->setDefault(dx, dy);
+    Double2DParamDescriptor* p = d.defineDouble2DParam(name);
+    p->setDefault(x, y);
     p->setDisplayRange(0.0, 0.0, 1.0, 1.0);
     p->setIncrement(0.001);
     p->setDigits(3);
     p->setDimensionLabels("x", "y");
-    return finish(p, label, hint, group);
+    return finish(p, label, hint, g);
 }
 
-ChoiceParamDescriptor* defineChoice(ImageEffectDescriptor& desc, const char* name, const char* label, const char* hint,
-                                    GroupParamDescriptor* group, std::initializer_list<const char*> options, int def)
+ChoiceParamDescriptor* choice(ImageEffectDescriptor& d, const char* name, const char* label, const char* hint,
+                              GroupParamDescriptor* g, std::initializer_list<const char*> opts, int def)
 {
-    ChoiceParamDescriptor* p = desc.defineChoiceParam(name);
-    for (const char* o : options) p->appendOption(o);
+    ChoiceParamDescriptor* p = d.defineChoiceParam(name);
+    for (const char* o : opts) p->appendOption(o);
     p->setDefault(def);
-    return finish(p, label, hint, group);
+    return finish(p, label, hint, g);
 }
 
-} // namespace
+}  // namespace
 
 void FacetGlassFactory::describeInContext(ImageEffectDescriptor& desc, ContextEnum context)
 {
-    // Clips
     ClipDescriptor* src = desc.defineClip(kOfxImageEffectSimpleSourceClipName);
     src->addSupportedComponent(ePixelComponentRGBA);
     src->setTemporalClipAccess(false);
-    src->setSupportsTiles(kSupportsTiles);
+    src->setSupportsTiles(true);
     src->setIsMask(false);
-
     if (context == eContextGeneral) {
-        ClipDescriptor* gls = desc.defineClip(kClipRefract);
-        gls->setLabels("Refract Source", "Refract", "Refract Source");
-        gls->addSupportedComponent(ePixelComponentRGBA);
-        gls->setTemporalClipAccess(false);
-        gls->setSupportsTiles(kSupportsTiles);
-        gls->setIsMask(false);
-        gls->setOptional(true);
+        ClipDescriptor* g = desc.defineClip(kClipRefract);
+        g->setLabels("Refract Source", "Refract", "Refract Source");
+        g->addSupportedComponent(ePixelComponentRGBA);
+        g->setTemporalClipAccess(false);
+        g->setSupportsTiles(true);
+        g->setIsMask(false);
+        g->setOptional(true);
     }
-
     ClipDescriptor* dst = desc.defineClip(kOfxImageEffectOutputClipName);
     dst->addSupportedComponent(ePixelComponentRGBA);
-    dst->setSupportsTiles(kSupportsTiles);
+    dst->setSupportsTiles(true);
 
     g_page = desc.definePageParam("Controls");
 
+    // ---------------------------------------------------------------- Shape
+    GroupParamDescriptor* gs = group(desc, "shapeGroup", "Shape");
+    {
+        ChoiceParamDescriptor* c = desc.defineChoiceParam(P_SHAPE);
+        for (int i = 0; i < fg3d::kShapeCount; ++i) c->appendOption(fg3d::shapeName(i));
+        c->setDefault(fg3d::kGem);
+        finish(c, "Shape", "The glass object held in front of the lens.", gs);
+    }
+    intp(desc, P_FACETS, "Facets", "Faceted Plate: steps. Radial Prism: sides. Crystal Cluster: crystals.", gs, 3, 1,
+         12, 1, 64);
+    finish(desc.defineBooleanParam(P_BOTH), "Both Sides", "Faceted Plate: facets on both sides of the centre.", gs);
+    dbl(desc, P_PRISM, "Prism Angle", "Faceted Plate / Radial Prism: facet angle in degrees.", gs, 6.0, 0.0, 30.0, 0.0, 70.0);
+    dbl(desc, P_CLEAR, "Clear Centre", "Radial Prism: size of the flat centre.", gs, 0.4, 0.0, 0.95, 0.0, 0.95);
+    dbl(desc, P_POWER, "Diopter Power",
+        "Diopters: magnification through the lens centre (+10 = 2x). Negative values shrink.", gs, 4.0, -10.0, 10.0,
+        -30.0, 30.0);
+    dbl(desc, P_THICK, "Thickness", "Thickness of plates, prisms and lenses.", gs, 0.3, 0.05, 1.0, 0.02, 3.0);
+    intp(desc, P_DETAIL, "Detail", "Geodesic Sphere: subdivisions (more = rounder).", gs, 1, 0, 4, 0, 4);
+    intp(desc, P_SEED, "Seed", "Variation of random shapes and of the sampling noise.", gs, 1, 0, 100, 0, 100000);
+
+    // ---------------------------------------------------------------- Placement
+    GroupParamDescriptor* gp = group(desc, "placementGroup", "Placement");
+    point(desc, P_CENTER, "Center", "Position of the glass in the frame (0..1, y up).", gp, 0.5, 0.5);
+    dbl(desc, P_DEPTH, "Depth", "Distance of the glass from the lens; the footage is at 1.", gp, 0.15, 0.02, 0.6, 0.01, 0.95);
+    for (const char* n : { P_TILT, P_TURN, P_ROLL }) {
+        const char* label = n == std::string(P_TILT) ? "Tilt" : n == std::string(P_TURN) ? "Turn" : "Roll";
+        const char* hint = n == std::string(P_TILT) ? "Rotate the glass up/down (degrees)."
+                           : n == std::string(P_TURN) ? "Rotate the glass left/right (degrees)."
+                                                      : "Rotate the glass around the lens axis (degrees).";
+        DoubleParamDescriptor* a = dbl(desc, n, label, hint, gp, 0.0, -180.0, 180.0);
+        a->setDoubleType(eDoubleTypeAngle);
+    }
+    dbl(desc, P_SIZE, "Size", "Size of the glass as a fraction of the frame height.", gp, 0.7, 0.1, 3.0, 0.005, 20.0);
+
     // ---------------------------------------------------------------- Glass
-    GroupParamDescriptor* glass = defineGroup(desc, "glassGroup", "Glass");
-    defineChoice(desc, kParamShape, "Shape", "The glass element in front of the lens.", glass,
-                 { "Linear Prism", "Radial Prism", "Split Diopter", "Round Diopter", "Crystal" }, FG_SHAPE_LINEAR);
-    definePoint(desc, kParamCenter, "Center", "Centre of the glass, normalised to the frame (0..1, y up).", glass, 0.5, 0.5);
-    DoubleParamDescriptor* angle = defineDouble(desc, kParamAngle, "Angle", "Rotation of the glass, in degrees.",
-                                                glass, 0.0, -180.0, 180.0);
-    angle->setDoubleType(eDoubleTypeAngle);
-    defineDouble(desc, kParamSize, "Size", "Size of the glass element (fraction of frame height).", glass,
-                 0.35, 0.05, 1.0, 0.01);
-    defineInt(desc, kParamFacets, "Facets", "Number of facets (prism steps, radial segments or crystal cells).",
-              glass, 1, 1, 12, 1, 64);
-    BooleanParamDescriptor* sym = desc.defineBooleanParam(kParamSymmetric);
-    sym->setDefault(false);
-    finish(sym, "Both Sides", "Linear Prism: add facets on both sides of the centre line.", glass);
-    defineDouble(desc, kParamInner, "Clear Centre", "Radial Prism / Crystal: radius of the clear centre.", glass,
-                 0.35, 0.0, 2.0, 0.0);
-    defineDouble(desc, kParamPrism, "Prism Angle", "Wedge angle of each prism facet, in degrees.", glass,
-                 8.0, 0.0, 30.0);
-    defineDouble(desc, kParamPower, "Diopter Power", "Diopter strength; positive is convex (magnifies).", glass,
-                 2.0, -20.0, 20.0);
-    defineDouble(desc, kParamIOR, "Strength (IOR)", "Index of refraction of the glass.", glass,
-                 1.5, 1.0, 2.0, 1.0, 3.0);
-    defineDouble(desc, kParamDispersion, "Chromatic Aberration", "Spectral dispersion of the glass.", glass,
-                 0.3, 0.0, 1.0, 0.0);
-    defineInt(desc, kParamSeed, "Seed", "Random seed for sampling noise and hand-held wobble.", glass,
-              1, 0, 100, 0);
+    GroupParamDescriptor* gg = group(desc, "glassGroup", "Glass");
+    dbl(desc, P_IOR, "Strength (IOR)", "Index of refraction: how strongly the glass bends light.", gg, 1.55, 1.0,
+        2.5, 1.0, 4.0);
+    dbl(desc, P_DISP, "Chromatic Aberration", "Spectral dispersion: rainbow edges.", gg, 0.4, 0.0, 1.5, 0.0, 5.0);
+    dbl(desc, P_REFL, "Reflections", "Strength of reflections off the glass faces (1 = physical).", gg, 1.0, 0.0,
+        3.0, 0.0, 20.0);
+    dbl(desc, P_ROUGH, "Roughness", "Blurs reflections and spreads highlights.", gg, 0.0, 0.0, 0.5, 0.0, 2.0);
+    dbl(desc, P_BEVEL, "Bevel Width", "Rounded edges that catch the light (fraction of the object size).", gg, 0.02,
+        0.0, 0.15, 0.0, 1.0);
+    dbl(desc, P_BEVANG, "Bevel Angle Limit", "Only edges sharper than this angle (degrees) get a bevel.", gg, 20.0,
+        0.0, 90.0, 0.0, 180.0);
+    intp(desc, P_BOUNCES, "Bounce Limit", "Maximum light bounces inside the glass.", gg, 12, 1, 64, 1, 256);
 
     // ---------------------------------------------------------------- Optics
-    GroupParamDescriptor* optics = defineGroup(desc, "opticsGroup", "Optics");
-    defineDouble(desc, kParamFStop, "F-Stop", "Lens aperture; lower values blur the out-of-focus glass more.",
-                 optics, 4.0, 0.95, 22.0, 0.5);
-    defineDouble(desc, kParamFocus, "Focus", "Focus distance: 0 = on the glass, 1 = on the footage.", optics,
-                 1.0, 0.0, 1.0, 0.0, 1.0);
-    defineDouble(desc, kParamFocusD, "Diopter Focus",
-                 "Focus for rays through a diopter (0 = glass, 1 = footage). Lets each half hold its own focus.",
-                 optics, 1.0, 0.0, 1.0, 0.0, 1.0);
-    defineDouble(desc, kParamGlassDist, "Glass Distance", "Distance of the glass from the lens (footage is at 1).",
-                 optics, 0.05, 0.01, 0.3, 0.005, 0.9);
-    defineChoice(desc, kParamEdge, "Outside Frame", "What refracted rays see beyond the frame edge.", optics,
-                 { "Clamp", "Mirror", "Repeat", "Black" }, FG_EDGE_MIRROR);
-    ChoiceParamDescriptor* quality =
-        defineChoice(desc, kParamQuality, "Quality", "Rays per pixel.", optics,
-                     { "Draft (8)", "Good (24)", "Final (64)", "Custom" }, kQualityGood);
-    quality->setAnimates(false);
-    IntParamDescriptor* samples =
-        defineInt(desc, kParamSamples, "Samples", "Rays per pixel when Quality is Custom.", optics, 96, 1, 256, 1, 1024);
-    samples->setAnimates(false);
-    samples->setIsSecret(true);
+    GroupParamDescriptor* go = group(desc, "opticsGroup", "Optics");
+    dbl(desc, P_FSTOP, "F-Stop", "Lens aperture: lower blurs the out-of-focus glass more.", go, 4.0, 0.95, 22.0, 0.5, 64.0);
+    dbl(desc, P_FOCUS, "Focus", "Focus distance: 0 = on the glass, 1 = on the footage.", go, 1.0, 0.0, 1.0, 0.0, 1.0);
+    dbl(desc, P_GFOCUS, "Glass Focus",
+        "Focus for what is seen through the glass (0 = glass, 1 = footage), e.g. a split diopter.", go, 1.0, 0.0, 1.0,
+        0.0, 1.0);
+
+    // ---------------------------------------------------------------- World
+    GroupParamDescriptor* gw = group(desc, "worldGroup", "Outside Frame", false);
+    choice(desc, P_WORLD, "Outside Frame", "What light from beyond the frame edge shows.", gw,
+           { "Spherical", "Mirror", "Repeat", "Clamp", "Black", "Transparent" }, FG_WORLD_SPHERICAL);
+    dbl(desc, P_WBLUR, "World Blur", "Blur of the off-screen surroundings.", gw, 4.0, 0.0, 8.0, 0.0, 12.0);
+    dbl(desc, P_FEATHER, "Feather", "Softens the frame edge seen in the glass.", gw, 0.05, 0.0, 0.5, 0.0, 5.0);
+
+    // ---------------------------------------------------------------- Lights
+    GroupParamDescriptor* gl = group(desc, "lightsGroup", "Lights", false);
+    for (int i = 0; i < kNumLights; ++i) {
+        const std::string n = "Light " + std::to_string(i + 1) + " ";
+        point(desc, kLightPos[i], (n + "Position").c_str(), "Where the light is (0..1, y up).", gl,
+              i == 0 ? 0.25 : 0.75, 0.8);
+        dbl(desc, kLightDepth[i], (n + "Depth").c_str(), "Distance of the light from the lens.", gl, 0.3, 0.02, 1.0,
+            0.01, 2.0);
+        dbl(desc, kLightSize[i], (n + "Size").c_str(), "Size of the light.", gl, 0.1, 0.01, 0.5, 0.001, 5.0);
+        dbl(desc, kLightKelvin[i], (n + "Kelvin").c_str(), "Colour temperature.", gl, i == 0 ? 5600 : 3200, 1500,
+            12000, 1000, 40000);
+        dbl(desc, kLightInt[i], (n + "Intensity").c_str(), "Brightness; 0 = off.", gl, 0.0, 0.0, 10.0, 0.0, 1000.0);
+    }
+
+    // ---------------------------------------------------------------- Motion
+    GroupParamDescriptor* gm = group(desc, "motionGroup", "Motion", false);
+    dbl(desc, P_WOBBLE, "Hand-held", "Amount of hand-held drift, tilt and roll over time.", gm, 0.0, 0.0, 1.0, 0.0, 5.0);
+    dbl(desc, P_WSPEED, "Hand-held Speed", "Speed of the hand-held motion.", gm, 1.0, 0.0, 5.0, 0.0, 50.0);
 
     // ---------------------------------------------------------------- Look
-    GroupParamDescriptor* look = defineGroup(desc, "lookGroup", "Look");
-    defineDouble(desc, kParamBoost, "Highlight Boost", "Brightens highlights seen through the glass.", look,
-                 0.5, 0.0, 4.0, 0.0);
-    defineDouble(desc, kParamThreshold, "Highlight Threshold", "Luminance above which highlights are boosted.", look,
-                 0.8, 0.0, 2.0);
-    defineDouble(desc, kParamRefl, "Reflection", "Fresnel reflection off the glass faces.", look,
-                 0.0, 0.0, 1.0, 0.0);
-    definePoint(desc, kParamLight, "Light Position", "Position of the light that glints off the glass (0..1, y up).",
-                look, 0.3, 0.75);
-    defineDouble(desc, kParamLightSize, "Light Size", "Size of the glint light.", look, 0.15, 0.01, 1.0, 0.001);
-    defineDouble(desc, kParamLightInt, "Light Intensity", "Brightness of the glint.", look, 0.0, 0.0, 10.0, 0.0);
-    defineDouble(desc, kParamWobble, "Hand-held Wobble", "Amount of hand-held drift of the glass over time.", look,
-                 0.0, 0.0, 1.0, 0.0);
-    defineDouble(desc, kParamWobbleSpeed, "Wobble Speed", "Speed of the hand-held drift.", look, 1.0, 0.0, 5.0, 0.0);
-    defineDouble(desc, kParamMix, "Mix", "Blend between the original (0) and the glass (1).", look, 1.0, 0.0, 1.0);
+    GroupParamDescriptor* gk = group(desc, "lookGroup", "Look");
+    dbl(desc, P_BOOST, "Highlight Boost", "Brightens highlights seen through the glass (sharper bokeh).", gk, 0.5,
+        0.0, 4.0, 0.0, 50.0);
+    dbl(desc, P_THRESH, "Highlight Threshold", "Linear brightness above which highlights are boosted.", gk, 1.0, 0.0,
+        4.0, 0.0, 100.0);
+    dbl(desc, P_MIX, "Mix", "Blend between the original (0) and the glass (1).", gk, 1.0, 0.0, 1.0);
+
+    // ---------------------------------------------------------------- Technical
+    GroupParamDescriptor* gt = group(desc, "technicalGroup", "Technical", false);
+    choice(desc, P_CSPACE, "Input Colour Space", "Encoding of the incoming footage; the glass is traced in linear light.",
+           gt, { "Linear", "Rec.709 (Gamma 2.4)", "sRGB", "Sony S-Log3", "ARRI LogC3", "ARRI LogC4", "Panasonic V-Log",
+                 "DaVinci Intermediate" }, FG_CS_REC709);
+    ChoiceParamDescriptor* q = choice(desc, P_QUALITY, "Quality", "Rays per pixel (adaptive).", gt,
+                                      { "Draft", "Good", "Final", "Custom" }, kQualityGood);
+    q->setAnimates(false);
+    IntParamDescriptor* mn = intp(desc, P_MINS, "Min Samples", "Custom quality: rays per pixel at least.", gt, 16, 1, 128, 1, 4096);
+    IntParamDescriptor* mx = intp(desc, P_MAXS, "Max Samples", "Custom quality: rays per pixel at most.", gt, 64, 1, 1024, 1, 16384);
+    DoubleParamDescriptor* nz = dbl(desc, P_NOISE, "Noise Threshold",
+                                    "Custom quality: stop adding rays when a pixel's noise falls below this.", gt, 0.02,
+                                    0.0, 0.1, 0.0, 1.0);
+    for (ParamDescriptor* d : { (ParamDescriptor*)mn, (ParamDescriptor*)mx, (ParamDescriptor*)nz }) d->setIsSecret(true);
+    mn->setAnimates(false);
+    mx->setAnimates(false);
+    nz->setAnimates(false);
 
     g_page = nullptr;
-}
-
-ImageEffect* FacetGlassFactory::createInstance(OfxImageEffectHandle handle, ContextEnum /*context*/)
-{
-    return new FacetGlassPlugin(handle);
 }
 
 void OFX::Plugin::getPluginIDs(PluginFactoryArray& ids)

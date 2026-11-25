@@ -1,95 +1,70 @@
 # FacetGlass — project brief for Claude Code
 
-FacetGlass is a **free, open-source (MIT) OpenFX plugin** for DaVinci Resolve (and other OFX hosts) that simulates real glass held in front of the lens: prisms, ghost repeats, split and round diopters, and crystal facets. Each pixel is ray-traced: rays start from points across a virtual lens aperture, pass through a glass element (Snell refraction, spectral dispersion, Fresnel reflection) and land on the footage. It's the owner's own clean-room alternative to commercial glass plugins such as Video Village's Mirage.
+FacetGlass is a **free, open-source (MIT) OpenFX plugin** for DaVinci Resolve (and other OFX hosts) that simulates real glass held in front of the lens: prisms, ghost repeats, split and round diopters, gems and crystals. Each pixel is path-traced: rays start from points across a virtual lens aperture, pass through a **solid 3D glass object** (Snell refraction, spectral dispersion, Fresnel reflection, total internal reflection, many bounces) and land on the footage, the off-screen world or a virtual light. It's the owner's own clean-room alternative to commercial glass plugins such as Video Village's Mirage.
 
-Owner: Saoud. He wants **top-notch quality** and will share it publicly. **Windows (NVIDIA) first**; macOS (Apple Silicon, Metal) follows on his Mac.
+Owner: Saoud. He wants **top-notch quality** and will share it publicly. **Windows (NVIDIA) first**; macOS (Apple Silicon, Metal) follows on his Mac. Keep explanations to him short and plain; ask one simple question at a time.
 
 ## Ground rules
 
-- **Clean room only.** Never decompile, disassemble or inspect Mirage or any other commercial plugin's binaries, and never use Craft Anything's Deep mode on them. Public product pages, demo videos and stills are fine (Craft Anything **Clean room** mode). Our algorithm is our own (see `src/core/fg_core.h`).
-- Don't copy anyone's code, presets, icons or names. Don't use "Mirage" in anything that ships.
-- Keep `src/core/fg_core.h` the **single source of truth** for the shading math. Every backend (CPU, CUDA, OpenCL, Metal) includes it through a small prelude. Never fork the math per backend.
+- **Clean room only.** Never decompile, disassemble or inspect Mirage or any other commercial plugin's binaries, and never use Craft Anything's Deep mode on them. Public product pages, demo videos and stills are fine (Craft Anything **Clean room** mode; the `watch` video skill for public videos). What the public demo shows is in `docs/research/public-demo-notes.md`. Our algorithm is our own.
+- Don't copy anyone's code, presets, icons, names or UI wording. Don't use "Mirage" in anything that ships.
+- Keep `src/core/fg3d_core.h` the **single source of truth** for the shading maths. Every backend (CPU, CUDA, later OpenCL/Metal) includes it through a small prelude (`fg3d_backend_*.h`). Never fork the maths per backend.
 
 ## Current status (as of 2026-11-25)
 
 Done and verified:
-1. **Fuse v1** (`reference/fuse/FacetGlass.fuse`): a working Fusion Fuse with the same model. It's useful as a reference and quick preview, but untested inside Resolve.
-2. **Portable core** (`src/core/`): `fg_params.h` (a plain-C parameter block, all 4-byte fields), `fg_core.h` (the shader, written against the macros FG_DEVICE / FG_GLOBAL / FG_PRIV / FG_SQRT …), and `fg_backend_cpu.h` (the CPU prelude). It reads images from **float RGBA buffers** with (x1, y1, w, h, strideInFloats), because OFX GPU render passes buffers, not textures. It handles render tiles and frame offsets.
-3. **Golden test**: `tests/compare_core.py` renders 9 presets through the Fuse kernel (`reference/kernel-harness`) and through the portable core, and requires a max abs difference under 1e-3. It currently passes at about 1e-7 (8e-5 on the mix=0 preset, from sampling). **Run it after any change to the core.**
-4. Vendored **OpenFX SDK** (`third_party/openfx`, BSD-3): headers, the C++ Support library, HostSupport (a host library, for a test host), and the `Examples/GPUGain` (CUDA/OpenCL/Metal render pattern) and `Examples/Basic` example plugins.
-5. **OFX plugin, CPU render** (`src/plugin/FacetGlassPlugin.cpp`): every parameter from the spec, optional Refract Source (General context, sampled by normalised position in its own frame), full-source RoI, wobble from time, multithreaded `fg_shade`. Static MSVC runtime.
-6. **OFX test host** (`tests/ofxhost/fg_ofxhost.cpp`, HostSupport + expat 2.6.4 via FetchContent): loads the bundle from one folder only (never the system OFX folders). `tests/compare_ofx.py` runs 18 checks: the 9 golden presets vs the Fuse kernel, 3x3 tiles, negative rowBytes, render scale 0.5, quality presets, wobble at frame 37, Refract Source at 1x and 2x resolution, and identity at mix 0. All pass (1.2e-7).
+1. **3D core** (`src/core/fg3d_params.h`, `fg3d_core.h`): path tracer for a solid triangle-mesh glass object with a BVH. Aperture depth of field, continuous spectral dispersion, Fresnel + TIR with a bounce limit, bevelled-edge normals, rough reflections, up to 4 camera-facing area lights, off-screen world (spherical / mirror / repeat / clamp / black / transparent) from a mip pyramid with blur and feather, input colour-space decode/encode, adaptive sampling. Its own exp/log/sin/cos make **CPU and CUDA bit-identical**.
+2. **Host library** (`src/host/`): procedural shapes (`fg3d_scene.cpp`: faceted plate, wedge prism, radial prism, split/round diopter, geodesic sphere, gem, crystal cluster, box, pyramid, rod), smooth groups, bevel edge data, orientation fix, BVH, UI → params (`makeParams`, the only place for host-side conversions), CPU passes (`fg3d_cpu*.h`), CUDA passes (`fg3d_cuda.cu`).
+3. **OFX plugin** (`src/plugin/FacetGlassPlugin.cpp`, v1.1): groups Shape / Placement / Glass / Optics / Outside Frame / Lights / Motion / Look / Technical; optional Refract Source (General context); full-source RoI; scene cached per instance; **CUDA render on the host's stream** when offered, multithreaded CPU otherwise. Static MSVC + CUDA runtimes.
+4. **Tests**:
+   - `fg3d_gpu_test`: CUDA vs CPU on 8 looks + negative stride + 2x refract source; must be exact (currently 0 difference). RTX 2080 Ti: 12–20x faster than CPU.
+   - `tests/compare_ofx.py`: the built bundle in the HostSupport test host (`tests/ofxhost/fg_ofxhost.cpp`) vs the standalone renderer (`fg3d_render`): 18 checks (8 looks, tiles, negative rowBytes, render scale 0.5, quality presets, wobble + lights, Refract Source, identity). All exact.
+   - `fg3d_math_test`: accuracy of the portable maths.
+   - `tests/fg3d_preview.py`: contact sheet of looks for eyeballing (`tests/out/fg3d/contact_sheet.png`).
+5. Legacy v1 (thin-glass) core `src/core/fg_core.h` + `tests/compare_core.py` + the Fuse in `reference/` remain as a reference only; the plugin no longer uses them.
 
-Not yet tested inside Resolve. GPU backends not started.
+Not yet verified inside Resolve (v1 loaded and showed up; v1.1 not yet installed/tested).
 
-## Build and test
+## Build and test (Windows)
 
+CMake ships with VS Build Tools: `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe`. The CUDA Toolkit is 13.5. A **fresh** build folder must be configured with the CUDA toolset or CUDA is not found:
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
-python tests/compare_core.py build/<Release/>fg_fuse_harness[.exe] build/<Release/>fg_core_equiv[.exe]
+set CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.5
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -T cuda="%CUDA_PATH%"
+cmake --build build --config Release --parallel
+build\Release\fg3d_math_test.exe
+build\Release\fg3d_gpu_test.exe tests\out\fg3d\in.raw 640 360      (in.raw is written by fg3d_preview.py)
+python tests/compare_ofx.py build/Release/fg_ofxhost.exe build build/Release/fg3d_render.exe
+python tests/fg3d_preview.py build/Release/fg3d_render.exe 640 360
 ```
-The Python test needs `numpy pillow scikit-image`.
+Python tests use the Anaconda Python (`numpy pillow scikit-image`); in Git Bash `python` is a different 3.14 install without numpy. Pipe long builds to a log file (`cmd /c "... > log 2>&1"`): expat's configure output on stderr makes PowerShell report failure.
 
-OFX plugin test (loads the built bundle in the test host; run after any plugin or core change):
-```bash
-python tests/compare_ofx.py build/<Release/>fg_ofxhost[.exe] build build/<Release/>fg_fuse_harness[.exe] build/<Release/>fg_core_equiv[.exe]
-```
-On Windows, CMake ships with VS Build Tools (`...\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe`); configure with `-G "Visual Studio 17 2022" -A x64`.
+Install (admin, ask Saoud first): `powershell -ExecutionPolicy Bypass -File tools\install_windows.ps1` copies the bundle to `C:\Program Files\Common Files\OFX\Plugins\FacetGlass.ofx.bundle`. Restart Resolve after installing.
 
-On Windows, use Visual Studio 2022 (MSVC) and the CUDA Toolkit for the GPU backend. Install the built plugin to:
-`C:\Program Files\Common Files\OFX\Plugins\FacetGlass.ofx.bundle\Contents\Win64\FacetGlass.ofx`
-(This needs admin rights. Restart Resolve after installing; Resolve rescans OFX plugins on launch.)
+**Run the GPU test and compare_ofx after any change to the core, the host library or the plugin.**
 
 ## Next steps (in order)
 
-### 1. OFX plugin, CPU render (`src/plugin/FacetGlassPlugin.cpp`)
-Follow `third_party/openfx/Examples/GPUGain/GPUGain.cpp` for structure (an `OFX::ImageProcessor` subclass, `setGPURenderArgs`, a factory, `getPluginIDs`). The CMake target `FacetGlass` is already wired up and activates once that file exists.
-
-- Plugin ID `com.facetglass.FacetGlass`, version 1.0, grouping "FacetGlass". Contexts: Filter and General. Float RGBA only. Supports tiles and multi-resolution.
-- Clips: `Source` (main) and optional `Refract Source` (General context). When it isn't connected, pass the source buffer as `gls` and set `useSource=0`.
-- **getRegionsOfInterest**: request the **full source RoD**, because refracted rays read anywhere in the frame.
-- Fill FGParams: the frame is the source RoD in pixels at the current render scale; src/gls come from `getBounds()` and `getRowBytes()/4` (rowBytes may be negative), with `getPixelAddress(x1, y1)` as the base pointer.
-- Parameters (match the Fuse; see `reference/fuse/FacetGlass.fuse` → Create() for every range and default):
-  - **Glass:** Shape (choice: Linear Prism, Radial Prism, Split Diopter, Round Diopter, Crystal), Center (Double2D, normalised 0..1, default 0.5, 0.5), Angle (degrees), Size 0.35, Facets 1, Both Sides (bool), Clear Centre 0.35, Prism Angle 8°, Diopter Power 2, Strength (IOR) 1.5, Chromatic Aberration 0.3, Seed 1.
-  - **Optics:** F-Stop 4, Focus 1, Diopter Focus 1, Glass Distance 0.05, Outside Frame (Clamp / Mirror / Repeat / Black, default Mirror), Quality (Draft 8 / Good 24 / Final 64 / Custom) + Samples 96.
-  - **Look:** Highlight Boost 0.5, Highlight Threshold 0.8, Reflection 0, Light Position (0.3, 0.75), Light Size 0.15, Light Intensity 0, Hand-held Wobble 0, Wobble Speed 1, Mix 1.
-- Host-side conversions (same as the Fuse's Lua):
-  - `aperture = glassDist * 0.3 / fstop`
-  - `focusInv(f) = 1 + (1/glassDist - 1) * (1 - f)^2`, used for both Focus and Diopter Focus
-  - angles in radians
-  - wobble: see `wobble()` in the Fuse, with time in frames and fps 24 as the base
-- CPU render: `multiThreadProcessImages` loops over the render window and calls `fg_shade`.
-
-### 2. OFX test host (`tests/ofxhost/`)
-Build a small CLI host on HostSupport (adapt `third_party/openfx/HostSupport/examples/hostDemo*`; it needs expat). It loads the bundle, sets params, renders the test image and compares the result with the golden renders. This lets the plugin be tested without Resolve.
-
-### 3. GPU backends (Resolve passes device buffers)
-- **CUDA** (`src/plugin/CudaKernel.cu`): a prelude with `__device__` functions, then a kernel that copies params into a local and calls `fg_shade`. Use the host's CUDA stream (`setSupportsCudaStream`).
-- **OpenCL** (`src/plugin/OpenCLKernel.cpp`): build the program at runtime from the prelude plus `fg_core.h` text, embedded as a string at build time. Cache the program per context.
-- **Metal** (macOS, `src/plugin/MetalKernel.mm`): an MSL prelude with `FG_GLOBAL = device`, `FG_PRIV = thread`.
-- Every GPU backend must match the CPU output within about 1e-4. Add a GPU-vs-CPU test.
-
-### 4. Top-notch features
-- An on-screen overlay interact for dragging Center and Angle in the viewer (see `Examples/Basic` BasicInteract).
-- Presets.
-- Custom glass shapes from an image (a height or normal map input).
-- HDRI or image reflections.
-- A blurred out-of-frame source (mip chain).
-- Recorded hand-held motion import.
-- Performance: adaptive samples, and blue-noise sampling instead of hash jitter.
-
-### 5. Release
-- GitHub Actions: windows-latest (MSVC + CUDA via Jimver/cuda-toolkit) and macos-14 (universal, Metal).
-- An installer (Inno Setup for Windows, a pkg for macOS), docs, a demo reel and a changelog.
+1. **Resolve test of v1.1** (CUDA mode): Edit, Color and Fusion pages; check every shape, the Refract Source input, proxy/half resolution, Deliver.
+2. **On-screen gizmo** (OFX overlay interact, see `Examples/Basic`): drag Center, rotate (tilt/turn/roll), depth, f-stop; drop to Draft while dragging.
+3. **Look polish** against the public demo: bevel quality, grain at Good quality (blue-noise / better sampling), split diopter behaviour, the "turned back" environment.
+4. **Presets** (our own names) and saved defaults; a global Final-quality switch.
+5. **OBJ import** (custom shapes, smoothing angle), **HDRI/EXR world**, more than 2 lights in the UI.
+6. **Recorded hand-held motion** (CSV pose import, loop/hold/ease).
+7. **OpenCL** (AMD/Intel on Windows) and **Metal** (macOS) backends through the same core; each must match the CPU exactly.
+8. **Release**: GitHub Actions (windows-latest with CUDA via Jimver/cuda-toolkit; macos-14 with Metal), installers (Inno Setup / pkg), docs, demo reel, changelog.
 
 ## Model notes (why things are the way they are)
 
-- Units: the footage plane sits at z = 1, the glass at z = glassDist (default 0.05), screen focal length 1, and screen y goes from -0.5 to 0.5 with x scaled by aspect.
-- **Diopter Focus** is a deliberate non-physical control. With flat footage, a physically correct diopter can only refocus by also shrinking that half of the frame a lot. Rays through a diopter therefore get their own focus distance, and the lens power adds magnification and dispersion on top.
-- Diopter slope = `-power * 0.02 * r_screen`, with positive power convex. Prism facets tilt by `tan(prismAngle * k)`.
-- Dispersion: 6 wavelengths from 430 to 680 nm, a Cauchy-like IOR offset, and per-channel normalised weights so white stays white.
-- Kernel coding rules (for GPU portability): no doubles (always use the `f` suffix), no vector operators (use scalar math and the fg3/fg4 structs), no recursion, no global/constant arrays, no textures, and no variable names that are keywords in some shading languages (`in`, `sample`, `half`).
+- Units: camera at the origin looking down +z, footage plane at z = 1 filling the frame (screen y in [-0.5, 0.5], x scaled by aspect). The object sits at `depth`; its world scale is `size * 0.5 * depth`, so Size is the screen fraction regardless of depth.
+- Object transform: `world = pos + scale * (R p)`, R = Rz(roll) · Ry(turn) · Rx(tilt). Meshes are authored around unit radius.
+- Aperture radius `0.3 * depth / fstop` (blur scales with the object, as in v1). `focusInv(f) = 1 + (1/depth - 1)(1 - f)^2` for Focus and Glass Focus.
+- **Glass Focus** is a deliberate non-physical control: paths that went through glass land shifted by the difference between the two focus distances for their aperture point, so a diopter region can hold its own focus.
+- **Diopter Power = magnification** through the lens centre (+P → 1 + 0.1P, −P → 1/(1 + 0.1P)); the lens curvature is solved for the current depth and scale, so lens meshes depend on Size and Depth (the plugin's scene cache keys on them only for lenses).
+- Reflection choice: probability `min(1, F * reflection)` (TIR always reflects); stochastic, unbiased for F.
+- Dispersion: wavelength per sample (golden-ratio sequence over 400–700 nm), Cauchy-like IOR offset, per-channel normalised weights so white stays white.
+- Sampling: R2 sequence for pixel jitter and aperture with per-pixel offsets (progressive, so adaptive stopping is unbiased in coverage); stop when relative standard error of luminance < threshold.
+- Kernel coding rules (GPU portability and bit-exactness): float only (`f` suffix), scalar maths and the fgv3/fgv4 structs, no recursion, no global/constant arrays (private arrays like the BVH stack are fine), no textures, no identifiers that are keywords somewhere (`in`, `sample`, `half`), no library exp/log/sin/cos (use the core's), and compile without FMA contraction (`--fmad=false`, MSVC `/fp:precise`).
 
 ## Craft Anything
 
