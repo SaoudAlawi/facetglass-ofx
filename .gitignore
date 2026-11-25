@@ -1,0 +1,8 @@
+build/
+out/
+tests/out/
+reference/kernel-harness/out/
+__pycache__/
+*.raw
+.vs/
+*.user

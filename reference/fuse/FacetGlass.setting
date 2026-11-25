@@ -1,0 +1,51 @@
+{
+	Tools = ordered() {
+		FacetGlassFX = MacroOperator {
+			CtrlWZoom = false,
+			Inputs = ordered() {
+				Shape = InstanceInput { SourceOp = "FacetGlass1", Source = "Shape", },
+				Center = InstanceInput { SourceOp = "FacetGlass1", Source = "Center", },
+				Angle = InstanceInput { SourceOp = "FacetGlass1", Source = "Angle", },
+				Size = InstanceInput { SourceOp = "FacetGlass1", Source = "Size", },
+				Facets = InstanceInput { SourceOp = "FacetGlass1", Source = "Facets", },
+				Symmetric = InstanceInput { SourceOp = "FacetGlass1", Source = "Symmetric", },
+				Inner = InstanceInput { SourceOp = "FacetGlass1", Source = "Inner", },
+				PrismAngle = InstanceInput { SourceOp = "FacetGlass1", Source = "PrismAngle", },
+				Power = InstanceInput { SourceOp = "FacetGlass1", Source = "Power", },
+				IOR = InstanceInput { SourceOp = "FacetGlass1", Source = "IOR", },
+				Dispersion = InstanceInput { SourceOp = "FacetGlass1", Source = "Dispersion", },
+				Seed = InstanceInput { SourceOp = "FacetGlass1", Source = "Seed", },
+				FStop = InstanceInput { SourceOp = "FacetGlass1", Source = "FStop", },
+				Focus = InstanceInput { SourceOp = "FacetGlass1", Source = "Focus", },
+				DiopterFocus = InstanceInput { SourceOp = "FacetGlass1", Source = "DiopterFocus", },
+				GlassDistance = InstanceInput { SourceOp = "FacetGlass1", Source = "GlassDistance", },
+				EdgeMode = InstanceInput { SourceOp = "FacetGlass1", Source = "EdgeMode", },
+				Quality = InstanceInput { SourceOp = "FacetGlass1", Source = "Quality", },
+				Samples = InstanceInput { SourceOp = "FacetGlass1", Source = "Samples", },
+				HighlightBoost = InstanceInput { SourceOp = "FacetGlass1", Source = "HighlightBoost", },
+				HighlightThreshold = InstanceInput { SourceOp = "FacetGlass1", Source = "HighlightThreshold", },
+				Reflection = InstanceInput { SourceOp = "FacetGlass1", Source = "Reflection", },
+				LightPosition = InstanceInput { SourceOp = "FacetGlass1", Source = "LightPosition", },
+				LightSize = InstanceInput { SourceOp = "FacetGlass1", Source = "LightSize", },
+				LightIntensity = InstanceInput { SourceOp = "FacetGlass1", Source = "LightIntensity", },
+				Wobble = InstanceInput { SourceOp = "FacetGlass1", Source = "Wobble", },
+				WobbleSpeed = InstanceInput { SourceOp = "FacetGlass1", Source = "WobbleSpeed", },
+				Mix = InstanceInput { SourceOp = "FacetGlass1", Source = "Mix", },
+				MainInput1 = InstanceInput { SourceOp = "FacetGlass1", Source = "Input", },
+				MainInput2 = InstanceInput { SourceOp = "FacetGlass1", Source = "Source", },
+			},
+			Outputs = {
+				MainOutput1 = InstanceOutput { SourceOp = "FacetGlass1", Source = "Output", },
+			},
+			ViewInfo = GroupInfo { Pos = { 0, 0 }, },
+			Tools = ordered() {
+				FacetGlass1 = Fuse.FacetGlass {
+					CtrlWZoom = false,
+					Inputs = { },
+					ViewInfo = OperatorInfo { Pos = { 0, 0 } },
+				},
+			},
+		},
+	},
+	ActiveTool = "FacetGlassFX"
+}
