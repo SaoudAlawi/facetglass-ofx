@@ -42,6 +42,16 @@
 #define FG_NODE_INTS 2
 #define FG_BVH_STACK 48
 
+/* Denoiser buffers (per pixel of the padded render region, tightly packed).
+ * Aux: 0..3 linear RGBA, 4 luminance variance of the pixel mean, 5 glass
+ * coverage, 6..8 mean first-hit normal, 9..10 mean landing position, 11 landing
+ * spread in pixels.
+ * CV (colour + variance, ping-ponged between iterations): RGBA, variance. */
+#define FG_AUX_FLOATS 12
+#define FG_CV_FLOATS 5
+#define FG_DENOISE_ITERS 4
+#define FG_DENOISE_PAD 30   /* 2 * (1 + 2 + 4 + 8): reach of 4 a-trous passes */
+
 typedef struct FG3DParams {
   /* Output frame (source RoD) in pixels at the current render scale. */
   float frameX, frameY, frameW, frameH;
@@ -80,6 +90,10 @@ typedef struct FG3DParams {
   float lightExposure;
 
   float lights[FG_MAX_LIGHTS * FG_LIGHT_FLOATS];
+
+  /* Denoiser: edge-stopping strength (0 = off). */
+  float denoise;
+  int pad3;
 } FG3DParams;
 
 #endif

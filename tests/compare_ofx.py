@@ -37,12 +37,12 @@ MAP = dict(shape=("shape", "shape"), facets=("facets", "facets"), bothSides=("bo
            world=("world", "outsideFrame"), worldBlur=("worldBlur", "worldBlur"), feather=("feather", "feather"),
            wobble=("wobble", "wobble"), wobbleSpeed=("wobbleSpeed", "wobbleSpeed"), boost=("boost", "highlightBoost"),
            threshold=("threshold", "highlightThreshold"), mix=("mix", "mix"),
-           colorSpace=("colorSpace", "inputColorSpace"))
+           colorSpace=("colorSpace", "inputColorSpace"), denoise=("denoise", "denoise"))
 BASE = dict(shape=15, facets=3, bothSides=0, prismAngle=6.0, clearCentre=0.4, power=4.0, thickness=0.3, detail=1,
             seed=1, center=(0.5, 0.5), depth=0.15, rotX=0.0, rotY=0.0, rotZ=0.0, size=0.7, ior=1.55,
             dispersion=0.4, reflection=1.0, roughness=0.0, bevelWidth=0.02, bevelAngle=20.0, maxBounces=12,
             fstop=4.0, focus=1.0, glassFocus=1.0, world=0, worldBlur=4.0, feather=0.05, wobble=0.0,
-            wobbleSpeed=1.0, boost=0.5, threshold=1.0, mix=1.0, colorSpace=0)
+            wobbleSpeed=1.0, boost=0.5, threshold=1.0, mix=1.0, colorSpace=0, denoise=0.0)
 SAMPLES = dict(minSamples=8, maxSamples=24, noise=0.03)
 QUALITY = {0: (4, 8, 0.05), 1: (16, 64, 0.025), 2: (48, 384, 0.008)}
 
@@ -56,6 +56,9 @@ LOOKS = {
                             focus=0.05, fstop=5.6),
     "box_slog3": dict(shape=23, size=0.6, depth=0.25, rotX=25, rotY=35, focus=0.0, fstop=8, colorSpace=3),
     "sphere_transparent": dict(shape=27, detail=2, size=0.8, depth=0.2, world=5, worldBlur=2.0),
+    "gem_denoised": dict(rotX=-35, rotY=15, ior=2.0, focus=0.05, fstop=5.6, denoise=0.5),
+    "crystals_denoised": dict(shape=21, facets=7, size=1.2, center=(0.3, 0.4), fstop=2.0, dispersion=0.7, seed=3,
+                              denoise=1.0),
 }
 
 
@@ -146,6 +149,9 @@ S = (SAMPLES["minSamples"], SAMPLES["maxSamples"], SAMPLES["noise"])
 ui = dict(BASE, **LOOKS["radial_prism"])
 out, info = run_host("tiles", inp, W, H, ofx_args(ui, S), ["--tiles", "3"])
 report("tiles 3x3 == full frame", out, full["radial_prism"], info, extra_ok=info.get("tiles") == "9")
+ui = dict(BASE, **LOOKS["crystals_denoised"])
+out, info = run_host("tiles_denoised", inp, W, H, ofx_args(ui, S), ["--tiles", "4"])
+report("tiles 4x4 == full frame (denoised)", out, full["crystals_denoised"], info, extra_ok=info.get("tiles") == "16")
 ui = dict(BASE, **LOOKS["gem"])
 out, info = run_host("negstride", inp, W, H, ofx_args(ui, S), ["--negstride"])
 report("negative rowBytes == normal", out, full["gem"], info)

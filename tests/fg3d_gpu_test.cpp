@@ -29,6 +29,8 @@ static const char* kLooks[][8] = {
     { "shape=23", "size=0.6", "depth=0.25", "rotX=25", "rotY=35", "focus=0", "fstop=8", "colorSpace=3" },
     { "shape=27", "detail=2", "size=0.8", "depth=0.2", "world=5", "wobble=0.7", "time=31", nullptr },
     { "shape=11", "power=4", "size=2.5", "depth=0.15", "rotZ=180", "focus=0.5", "glassFocus=1", "fstop=2" },
+    { "shape=15", "size=0.7", "depth=0.15", "rotX=-35", "rotY=15", "ior=2.0", "focus=0.05", "denoise=0.5" },
+    { "shape=21", "facets=7", "size=1.2", "depth=0.15", "fstop=2", "dispersion=0.7", "seed=3", "denoise=1" },
 };
 
 static void check(cudaError_t e, const char* what)
@@ -90,15 +92,15 @@ int main(int argc, char** argv)
             buildPyramidCPU(gimg.data(), 0, 0, GW, GH, GW * 4, 0, 0, GW, GH, ui.colorSpace, gpyr, glevels);
             pc.glsW = GW; pc.glsH = GH; pc.glsLevels = glevels; pc.useSource = 1;
         }
-        const unsigned nt = std::max(1u, std::thread::hardware_concurrency());
-        std::vector<std::thread> pool;
-        for (unsigned t = 0; t < nt; ++t)
-            pool.emplace_back([&, t] {
-                for (int y = (int)t; y < H; y += (int)nt)
-                    shadeCPU(pc, pyr.data(), refract ? gpyr.data() : pyr.data(), scene, 0, W, y, y + 1,
-                             [&](int yy) { return &cpu[(size_t)yy * W * 4]; });
-            });
-        for (auto& th : pool) th.join();
+        renderCPU(pc, pyr.data(), refract ? gpyr.data() : pyr.data(), scene, 0, W, 0, H,
+                  [](int b, int e, auto fn) {
+                      const unsigned nt = std::max(1u, std::thread::hardware_concurrency());
+                      std::vector<std::thread> pool;
+                      for (unsigned t = 0; t < nt; ++t)
+                          pool.emplace_back([&, t] { for (int i = b + (int)t; i < e; i += (int)nt) fn(i); });
+                      for (auto& th : pool) th.join();
+                  },
+                  [&](int yy) { return &cpu[(size_t)yy * W * 4]; });
         const double cpuMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count();
 
         // GPU, in 2x2 render windows.

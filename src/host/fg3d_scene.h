@@ -135,6 +135,7 @@ struct UIParams {
     double worldBlur = 4.0, feather = 0.05;
     int colorSpace = FG_CS_LINEAR;
     double boost = 0.5, threshold = 1.0, mix = 1.0;
+    double denoise = 0.0;                 // 0 = off, 1 = strongest
     int seed = 1;
     // Virtual lights: position (normalised x, y), depth, size (fraction of frame height),
     // colour temperature (K), intensity (stops: 0 = off).

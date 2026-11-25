@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <functional>
 #include <mutex>
 
 #ifdef _WIN32
@@ -87,6 +88,7 @@
 #define P_BOOST "highlightBoost"
 #define P_THRESH "highlightThreshold"
 #define P_MIX "mix"
+#define P_DENOISE "denoise"
 #define P_CSPACE "inputColorSpace"
 #define P_QUALITY "quality"
 #define P_MINS "minSamples"
@@ -150,29 +152,31 @@ ShapeUse shapeUse(int s)
 }  // namespace
 
 ////////////////////////////////////////////////////////////////////////////////
-// CPU processor: runs fg3d_shade over the render window on the host's threads.
+// CPU: a parallel-for on the host's threads (OFX multithread suite).
 
-class CpuProcessor : public ImageProcessor
+class RowJob : public MultiThread::Processor
 {
 public:
-    CpuProcessor(ImageEffect& e, const FG3DParams& p, const float* src, const float* gls,
-                 const fg3d::SceneBuffers& s)
-        : ImageProcessor(e), _p(p), _src(src), _gls(gls), _s(s) {}
-
-    void multiThreadProcessImages(OfxRectI win) override
+    RowJob(int b, int e, const std::function<void(int)>& fn) : _b(b), _e(e), _fn(fn) {}
+    void multiThreadFunction(unsigned int id, unsigned int n) override
     {
-        for (int y = win.y1; y < win.y2; ++y) {
-            if (_effect.abort()) break;
-            fg3d::shadeCPU(_p, _src, _gls, _s, win.x1, win.x2, y, y + 1,
-                           [&](int yy) { return static_cast<float*>(_dstImg->getPixelAddress(win.x1, yy)); });
-        }
+        for (int i = _b + (int)id; i < _e; i += (int)n) _fn(i);  // interleaved rows balance the load
     }
 
 private:
-    FG3DParams _p;
-    const float* _src;
-    const float* _gls;
-    const fg3d::SceneBuffers& _s;
+    int _b, _e;
+    const std::function<void(int)>& _fn;
+};
+
+struct HostParallel {
+    template <class Fn>
+    void operator()(int b, int e, Fn fn) const
+    {
+        if (e <= b) return;
+        const std::function<void(int)> f = fn;
+        RowJob job(b, e, f);
+        job.multiThread();
+    }
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -211,6 +215,7 @@ private:
     IntParam *_facets, *_detail, *_seed, *_bounces, *_minS, *_maxS;
     StringParam* _obj;
     BooleanParam *_both, *_interacting;
+    DoubleParam* _denoise;
     DoubleParam *_prism, *_clear, *_power, *_thick, *_depth, *_tilt, *_turn, *_roll, *_size, *_ior, *_disp, *_refl,
         *_rough, *_bevel, *_bevAng, *_fstop, *_focus, *_gfocus, *_wblur, *_feather, *_wobble, *_wspeed, *_boost,
         *_thresh, *_mix, *_noise, *_smooth;
@@ -269,6 +274,7 @@ FacetGlassPlugin::FacetGlassPlugin(OfxImageEffectHandle handle) : ImageEffect(ha
     _boost = fetchDoubleParam(P_BOOST);
     _thresh = fetchDoubleParam(P_THRESH);
     _mix = fetchDoubleParam(P_MIX);
+    _denoise = fetchDoubleParam(P_DENOISE);
     _noise = fetchDoubleParam(P_NOISE);
     _center = fetchDouble2DParam(P_CENTER);
     for (int i = 0; i < kNumLights; ++i) {
@@ -346,6 +352,7 @@ void FacetGlassPlugin::readUI(double t, fg3d::UIParams& ui)
     ui.boost = _boost->getValueAtTime(t);
     ui.threshold = _thresh->getValueAtTime(t);
     ui.mix = _mix->getValueAtTime(t);
+    ui.denoise = _denoise->getValueAtTime(t);
     ui.colorSpace = choiceAt(_cspace, t);
     bool dragging = false;
     _interacting->getValue(dragging);
@@ -495,10 +502,10 @@ void FacetGlassPlugin::render(const RenderArguments& args)
                               ui.colorSpace, glsPyr, glevels);
         p.glsW = gw; p.glsH = gh; p.glsLevels = glevels; p.useSource = 1;
     }
-    CpuProcessor proc(*this, p, srcPyr.data(), gls ? glsPyr.data() : srcPyr.data(), *sc);
-    proc.setDstImg(dst.get());
-    proc.setRenderWindow(args.renderWindow);
-    proc.process();
+    Image* d = dst.get();
+    fg3d::renderCPU(p, srcPyr.data(), gls ? glsPyr.data() : srcPyr.data(), *sc, args.renderWindow.x1,
+                    args.renderWindow.x2, args.renderWindow.y1, args.renderWindow.y2, HostParallel{},
+                    [&](int yy) { return static_cast<float*>(d->getPixelAddress(args.renderWindow.x1, yy)); });
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1203,6 +1210,9 @@ void FacetGlassFactory::describeInContext(ImageEffectDescriptor& desc, ContextEn
     ChoiceParamDescriptor* q = choice(desc, P_QUALITY, "Quality", "Rays per pixel (adaptive).", gt,
                                       { "Draft", "Good", "Final", "Custom" }, kQualityGood);
     q->setAnimates(false);
+    dbl(desc, P_DENOISE, "Denoise",
+        "Smooths leftover grain while keeping facet edges and detail (0 = off). Works best with Good or Final.", gt,
+        0.5, 0.0, 1.0, 0.0, 2.0);
     IntParamDescriptor* mn = intp(desc, P_MINS, "Min Samples", "Custom quality: rays per pixel at least.", gt, 16, 1, 128, 1, 4096);
     IntParamDescriptor* mx = intp(desc, P_MAXS, "Max Samples", "Custom quality: rays per pixel at most.", gt, 64, 1, 1024, 1, 16384);
     DoubleParamDescriptor* nz = dbl(desc, P_NOISE, "Noise Threshold",

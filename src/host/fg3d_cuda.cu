@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: MIT
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstdio>
+#include <utility>
 
 #include "fg3d_backend_cuda.cuh"
 #include "fg3d_cuda.h"
@@ -46,6 +48,41 @@ __global__ void shadeKernel(FG3DParams p, const float* srcPyr, const float* glsP
     o[0] = c.x; o[1] = c.y; o[2] = c.z; o[3] = c.w;
 }
 
+__global__ void traceKernel(FG3DParams p, const float* srcPyr, const float* glsPyr, const float* tris,
+                            const float* nodesF, const int* nodesI, float* aux, float* cv, int rx0, int ry0, int w, int h)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i >= w || j >= h) return;
+    FG3DParams pp = p;
+    float* a = aux + ((long long)j * w + i) * FG_AUX_FLOATS;
+    fg3d_trace(&pp, srcPyr, glsPyr, tris, nodesF, nodesI, rx0 + i, ry0 + j, a);
+    float* c = cv + ((long long)j * w + i) * FG_CV_FLOATS;
+    for (int k = 0; k < FG_CV_FLOATS; ++k) c[k] = a[k];
+}
+
+__global__ void atrousKernel(const float* aux, const float* in, float* out, int w, int h, int step, float sigma,
+                             float frameH)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i >= w || j >= h) return;
+    fg3d_atrous(aux, in, out, w, h, i, j, step, sigma, frameH);
+}
+
+__global__ void finishKernel(FG3DParams p, const float* srcPyr, const float* cv, int rx0, int ry0, int w, float* dst,
+                             int dstX1, int dstY1, int dstStride, int x0, int y0, int x1, int y1)
+{
+    const int x = x0 + blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = y0 + blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= x1 || y >= y1) return;
+    FG3DParams pp = p;
+    const float* c = cv + ((long long)(y - ry0) * w + (x - rx0)) * FG_CV_FLOATS;
+    fgv4 o = fg3d_finish(&pp, srcPyr, x, y, fgv4m(c[0], c[1], c[2], c[3]));
+    float* d = dst + (long long)(y - dstY1) * dstStride + (long long)(x - dstX1) * 4;
+    d[0] = o.x; d[1] = o.y; d[2] = o.z; d[3] = o.w;
+}
+
 dim3 grid2d(int w, int h, dim3 b) { return dim3((w + b.x - 1) / b.x, (h + b.y - 1) / b.y); }
 
 // Builds a linear pyramid for one image in device memory `pyr`.
@@ -84,10 +121,18 @@ const char* renderCUDA(const CudaFrame& f, FG3DParams p, const SceneBuffers& sce
     const size_t nfBytes = scene.nodesF.size() * sizeof(float);
     const size_t niBytes = scene.nodesI.size() * sizeof(int);
 
+    // Denoiser region: the window padded by the filter's reach, clamped to the frame.
+    const bool dn = p.denoise > 0.0f;
+    const int rx0 = std::max(f.winX1 - FG_DENOISE_PAD, f.frameX), rx1 = std::min(f.winX2 + FG_DENOISE_PAD, f.frameX + f.frameW);
+    const int ry0 = std::max(f.winY1 - FG_DENOISE_PAD, f.frameY), ry1 = std::min(f.winY2 + FG_DENOISE_PAD, f.frameY + f.frameH);
+    const int rw = dn ? std::max(0, rx1 - rx0) : 0, rh = dn ? std::max(0, ry1 - ry0) : 0;
+    const size_t auxBytes = (size_t)rw * rh * FG_AUX_FLOATS * 4, cvBytes = (size_t)rw * rh * FG_CV_FLOATS * 4;
+
     // One allocation for everything this render needs.
     auto align = [](size_t n) { return (n + 255) & ~(size_t)255; };
     const size_t oSrc = 0, oGls = align(oSrc + srcFloats * 4), oTri = align(oGls + glsFloats * 4),
-                 oNF = align(oTri + triBytes + 16), oNI = align(oNF + nfBytes + 16), total = align(oNI + niBytes + 16);
+                 oNF = align(oTri + triBytes + 16), oNI = align(oNF + nfBytes + 16), oAux = align(oNI + niBytes + 16),
+                 oCvA = align(oAux + auxBytes), oCvB = align(oCvA + cvBytes), total = align(oCvB + cvBytes);
     char* mem = nullptr;
     cudaError_t e = cudaMallocAsync(reinterpret_cast<void**>(&mem), total, st);
     if (e != cudaSuccess) {
@@ -113,7 +158,19 @@ const char* renderCUDA(const CudaFrame& f, FG3DParams p, const SceneBuffers& sce
     p.useSource = hasGls ? 1 : 0;
 
     const int ww = f.winX2 - f.winX1, wh = f.winY2 - f.winY1;
-    if (ww > 0 && wh > 0) {
+    if (dn && ww > 0 && wh > 0 && rw > 0 && rh > 0) {
+        float* aux = reinterpret_cast<float*>(mem + oAux);
+        float* cur = reinterpret_cast<float*>(mem + oCvA);
+        float* nxt = reinterpret_cast<float*>(mem + oCvB);
+        const dim3 b(16, 8);
+        traceKernel<<<grid2d(rw, rh, b), b, 0, st>>>(p, srcPyr, glsPyr, tris, nodesF, nodesI, aux, cur, rx0, ry0, rw, rh);
+        for (int it = 0; it < FG_DENOISE_ITERS; ++it) {
+            atrousKernel<<<grid2d(rw, rh, b), b, 0, st>>>(aux, cur, nxt, rw, rh, 1 << it, p.denoise, p.frameH);
+            std::swap(cur, nxt);
+        }
+        finishKernel<<<grid2d(ww, wh, b), b, 0, st>>>(p, srcPyr, cur, rx0, ry0, rw, f.dst, f.dstX1, f.dstY1, f.dstStride,
+                                                      f.winX1, f.winY1, f.winX2, f.winY2);
+    } else if (ww > 0 && wh > 0) {
         const dim3 b(16, 8);
         shadeKernel<<<grid2d(ww, wh, b), b, 0, st>>>(p, srcPyr, glsPyr, tris, nodesF, nodesI, f.dst, f.dstX1, f.dstY1,
                                                      f.dstStride, f.winX1, f.winY1, f.winX2, f.winY2);

@@ -270,6 +270,9 @@ void makeParams(const UIParams& ui, float frameX, float frameY, float frameW, fl
     p.boost = (float)ui.boost;
     p.threshold = (float)ui.threshold;
     p.mix = (float)ui.mix;
+    // Denoiser edge-stopping strength: 0 = off; the default amount 0.5 gives sigma
+    // 2.75, the best all-round setting in tests/fg3d_noise.py (1.0 -> 4.5, 2.0 -> 8).
+    p.denoise = ui.denoise > 0 ? (float)(1.0 + 3.5 * std::min(ui.denoise, 2.0)) : 0.0f;
 
     int nl = 0;
     for (int i = 0; i < ui.numLights && i < FG_MAX_LIGHTS; ++i) {

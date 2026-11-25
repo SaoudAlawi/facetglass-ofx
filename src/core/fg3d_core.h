@@ -460,15 +460,20 @@ FG_DEVICE fgv4 fg3d_boost(FG_PRIV const FG3DParams* p, fgv4 c)
 
 /* ------------------------------------------------------------------ shade */
 
-FG_DEVICE fgv4 fg3d_shade(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* src, FG_GLOBAL const float* gls,
+/* Traces one pixel: returns its linear RGBA (before Mix and encoding). When
+   `aux` is not null it also writes the denoiser guides (FG_AUX_FLOATS). */
+FG_DEVICE fgv4 fg3d_trace(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* src, FG_GLOBAL const float* gls,
                           FG_GLOBAL const float* tris, FG_GLOBAL const float* nodesF, FG_GLOBAL const int* nodesI,
-                          int x, int y)
+                          int x, int y, FG_GLOBAL float* aux)
 {
   float W = p->frameW, H = p->frameH;
   float aspect = W / H;
   float fx = (float)x - p->frameX, fy = (float)y - p->frameY;
   float pixU = (fx + 0.5f) / W, pixV = (fy + 0.5f) / H;
-  fgv4 orig = fg3d_lookup(src, p->srcW, p->srcH, p->srcLevels, pixU, pixV, 0.0f);
+  float covN = 0.0f, gnx = 0.0f, gny = 0.0f, gnz = 0.0f, luSum = 0.0f, lvSum = 0.0f, luSq = 0.0f, lvSq = 0.0f;
+  /* Sums for the variance of the weighted (spectral) mean, per channel:
+     sum w^2 c^2, sum w^2 c, sum w^2. */
+  float qR2 = 0.0f, qR1 = 0.0f, qR0 = 0.0f, qG2 = 0.0f, qG1 = 0.0f, qG0 = 0.0f, qB2 = 0.0f, qB1 = 0.0f, qB0 = 0.0f;
 
   float zf = 1.0f / p->focusInv;
   float zg = 1.0f / p->glassFocusInv;
@@ -546,6 +551,10 @@ FG_DEVICE fgv4 fg3d_shade(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* sr
       fgv3 hitO = fgv_madd(ro, rd, th);
       fgv3 ng = fgv_load(tr + 18);
       fgv3 ns = fg3d_shading_normal(tr, uh, vh, p->bevelWidth / s);
+      if (b == 0) {
+        fgv3 nw = fg3d_rot(p, ns);
+        covN += 1.0f; gnx += nw.x; gny += nw.y; gnz += nw.z;
+      }
       int entering = fgv_dot(rd, ng) < 0.0f ? 1 : 0;
       fgv3 nn = entering != 0 ? ns : fgv_mul(ns, -1.0f);      /* faces the incoming ray */
       fgv3 gn = entering != 0 ? ng : fgv_mul(ng, -1.0f);
@@ -612,6 +621,15 @@ FG_DEVICE fgv4 fg3d_shade(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* sr
       c = fg3d_escape(p, src, gls, o, d, glass, aspect, pixU, pixV);
     }
 
+    /* Landing position on the footage plane (denoiser guide; -1 when turned back). */
+    if (d.z > 1e-6f) {
+      float tl = (1.0f - o.z) / d.z;
+      float lu = (o.x + d.x * tl) / aspect + 0.5f, lv = o.y + d.y * tl + 0.5f;
+      luSum += lu; lvSum += lv; luSq += lu * lu; lvSq += lv * lv;
+    } else {
+      luSum -= 1.0f; lvSum -= 1.0f; luSq += 1.0f; lvSq += 1.0f;
+    }
+
     if (glass != 0) c = fg3d_boost(p, c);
     c.x = c.x * thr + add.x; c.y = c.y * thr + add.y; c.z = c.z * thr + add.z; c.w = c.w * thr + add.w;
 
@@ -620,6 +638,12 @@ FG_DEVICE fgv4 fg3d_shade(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* sr
     accB += c.z * sw.z; wB += sw.z;
     accA += c.w;
     n = i + 1;
+    {
+      float a2 = sw.x * sw.x, b2 = sw.y * sw.y, d2 = sw.z * sw.z;
+      qR2 += a2 * c.x * c.x; qR1 += a2 * c.x; qR0 += a2;
+      qG2 += b2 * c.y * c.y; qG1 += b2 * c.y; qG0 += b2;
+      qB2 += d2 * c.z * c.z; qB1 += d2 * c.z; qB0 += d2;
+    }
 
     /* Per-sample channel estimates: spectral weights divided by their average
        over 400-700 nm, so each is an unbiased sample of the final channel. */
@@ -640,10 +664,118 @@ FG_DEVICE fgv4 fg3d_shade(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* sr
 
   float rR = accR / FG_FMAX(wR, 1e-6f), rG = accG / FG_FMAX(wG, 1e-6f), rB = accB / FG_FMAX(wB, 1e-6f);
   float rA = accA / (float)(n > 0 ? n : 1);
+  if (aux != 0) {
+    float fn = (float)(n > 0 ? n : 1);
+    aux[0] = rR; aux[1] = rG; aux[2] = rB; aux[3] = rA;
+    /* Variance of each weighted mean: sum w^2 (c - mean)^2 / (sum w)^2, with the
+       n / (n - 1) small-sample correction; combined as luminance. */
+    float vr = FG_FMAX(0.0f, qR2 - 2.0f * rR * qR1 + rR * rR * qR0) / FG_FMAX(wR * wR, 1e-12f);
+    float vg = FG_FMAX(0.0f, qG2 - 2.0f * rG * qG1 + rG * rG * qG0) / FG_FMAX(wG * wG, 1e-12f);
+    float vb = FG_FMAX(0.0f, qB2 - 2.0f * rB * qB1 + rB * rB * qB0) / FG_FMAX(wB * wB, 1e-12f);
+    aux[4] = n > 1 ? (0.0452f * vr + 0.5115f * vg + 0.0052f * vb) * fn / (fn - 1.0f) : 1.0f;
+    aux[5] = covN / fn;
+    float nl = FG_SQRT(gnx * gnx + gny * gny + gnz * gnz);
+    float ni = nl > 1e-12f ? 1.0f / nl : 0.0f;
+    aux[6] = gnx * ni; aux[7] = gny * ni; aux[8] = gnz * ni;
+    aux[9] = luSum / fn; aux[10] = lvSum / fn;
+    /* Spread of the landing points in pixels: rays that all land within about a
+       pixel see sharp detail (their variation is anti-aliasing, not grain). */
+    float vu = FG_FMAX(0.0f, luSq / fn - aux[9] * aux[9]), vv = FG_FMAX(0.0f, lvSq / fn - aux[10] * aux[10]);
+    aux[11] = FG_SQRT(vu * W * W + vv * H * H);
+  }
+  return fgv4m(rR, rG, rB, rA);
+}
+
+/* Blends a traced (or denoised) linear colour with the original by Mix and
+   encodes it back to the footage's colour space. */
+FG_DEVICE fgv4 fg3d_finish(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* src, int x, int y, fgv4 c)
+{
+  float pixU = ((float)x - p->frameX + 0.5f) / p->frameW, pixV = ((float)y - p->frameY + 0.5f) / p->frameH;
+  fgv4 orig = fg3d_lookup(src, p->srcW, p->srcH, p->srcLevels, pixU, pixV, 0.0f);
   float m = p->mix;
   int cs = p->colorSpace;
-  return fgv4m(fg3d_encode(cs, orig.x + (rR - orig.x) * m), fg3d_encode(cs, orig.y + (rG - orig.y) * m),
-               fg3d_encode(cs, orig.z + (rB - orig.z) * m), orig.w + (rA - orig.w) * m);
+  return fgv4m(fg3d_encode(cs, orig.x + (c.x - orig.x) * m), fg3d_encode(cs, orig.y + (c.y - orig.y) * m),
+               fg3d_encode(cs, orig.z + (c.z - orig.z) * m), orig.w + (c.w - orig.w) * m);
+}
+
+/* Trace + finish (no denoiser). */
+FG_DEVICE fgv4 fg3d_shade(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* src, FG_GLOBAL const float* gls,
+                          FG_GLOBAL const float* tris, FG_GLOBAL const float* nodesF, FG_GLOBAL const int* nodesI,
+                          int x, int y)
+{
+  return fg3d_finish(p, src, x, y, fg3d_trace(p, src, gls, tris, nodesF, nodesI, x, y, 0));
+}
+
+/* ------------------------------------------------------------------ denoiser */
+
+/* One edge-aware a-trous wavelet pass (5x5 B3-spline taps spaced `step` apart)
+   over a w x h region. Neighbours are weighted by how well their colour agrees
+   relative to the estimated noise, and by the glass coverage, first-hit normal
+   and landing position guides, so facet edges and refracted detail survive.
+   The variance is propagated so later passes adapt (as in SVGF). */
+FG_DEVICE void fg3d_atrous(FG_GLOBAL const float* aux, FG_GLOBAL const float* cvIn, FG_GLOBAL float* cvOut, int w, int h,
+                           int x, int y, int step, float sigma, float frameH)
+{
+  FG_GLOBAL const float* ap = aux + (y * w + x) * FG_AUX_FLOATS;
+  FG_GLOBAL const float* cp = cvIn + (y * w + x) * FG_CV_FLOATS;
+  FG_GLOBAL float* op = cvOut + (y * w + x) * FG_CV_FLOATS;
+  /* Pixels whose rays land within ~1.5 px of each other show sharp detail (the
+     footage in focus, or seen through flat glass): their variation is
+     anti-aliasing, not grain, so they pass through. Blurred regions, inside the
+     glass or not (out-of-focus footage), are denoised. */
+  if (ap[11] < 1.5f) {
+    op[0] = cp[0]; op[1] = cp[1]; op[2] = cp[2]; op[3] = cp[3]; op[4] = cp[4];
+    return;
+  }
+  /* Colour agreement is judged on compressed luminance T(l) = l / (1 + l), so
+     bright out-of-focus highlights (bokeh) can be smoothed; blending itself
+     stays in linear light. The noise scale maps through T'(l) = 1 / (1 + l)^2. */
+  float lin = FG_FMAX(0.0f, 0.2126f * cp[0] + 0.7152f * cp[1] + 0.0722f * cp[2]);
+  float lp = lin / (1.0f + lin);
+  float dT = 1.0f / ((1.0f + lin) * (1.0f + lin));
+  /* Noise scale from a 3x3 Gaussian of the neighbours' variance (as in SVGF): a
+     pixel whose few rays all missed a small bright light looks noise-free on its
+     own, which would stop it blending with its bright neighbours. */
+  float vsum = 0.0f;
+  for (int vy = -1; vy <= 1; vy++)
+    for (int vx = -1; vx <= 1; vx++) {
+      int sx = fg3d_clampi(x + vx, 0, w - 1), sy = fg3d_clampi(y + vy, 0, h - 1);
+      float kw = ((vx == 0) ? 0.5f : 0.25f) * ((vy == 0) ? 0.5f : 0.25f);
+      vsum += kw * FG_FMAX(cvIn[(sy * w + sx) * FG_CV_FLOATS + 4], 0.0f);
+    }
+  float denom = sigma * FG_SQRT(vsum) * dT + 1e-4f;
+  float sr = 0.0f, sg = 0.0f, sb = 0.0f, sa = 0.0f, sv = 0.0f, sw = 0.0f;
+  for (int dy = -2; dy <= 2; dy++) {
+    float ky = (dy == 0) ? 0.375f : ((dy == 1 || dy == -1) ? 0.25f : 0.0625f);
+    int qy = fg3d_clampi(y + dy * step, 0, h - 1);
+    for (int dx = -2; dx <= 2; dx++) {
+      float kx = (dx == 0) ? 0.375f : ((dx == 1 || dx == -1) ? 0.25f : 0.0625f);
+      int qx = fg3d_clampi(x + dx * step, 0, w - 1);
+      FG_GLOBAL const float* aq = aux + (qy * w + qx) * FG_AUX_FLOATS;
+      FG_GLOBAL const float* cq = cvIn + (qy * w + qx) * FG_CV_FLOATS;
+      float wt = kx * ky;
+      if (aq[11] < 1.5f) wt = 0.0f;   /* never borrow from sharp pixels */
+      else if (dx != 0 || dy != 0) {
+        float lq = FG_FMAX(0.0f, 0.2126f * cq[0] + 0.7152f * cq[1] + 0.0722f * cq[2]);
+        lq = lq / (1.0f + lq);
+        wt *= fg3d_exp(-FG_FABS(lp - lq) / denom);
+        wt *= fg3d_exp(-6.0f * FG_FABS(ap[5] - aq[5]));
+        if (ap[5] > 0.01f && aq[5] > 0.01f) {
+          float nd = FG_FMAX(0.0f, ap[6] * aq[6] + ap[7] * aq[7] + ap[8] * aq[8]);
+          nd *= nd; nd *= nd; nd *= nd; nd *= nd; nd *= nd;   /* ^32 */
+          wt *= nd;
+        }
+        float du = ap[9] - aq[9], dv = ap[10] - aq[10];
+        float duv = FG_SQRT(du * du + dv * dv) * frameH / (float)step;
+        wt *= fg3d_exp(-0.5f * FG_FMAX(0.0f, duv - 4.0f));
+      }
+      sr += cq[0] * wt; sg += cq[1] * wt; sb += cq[2] * wt; sa += cq[3] * wt;
+      sv += cq[4] * wt * wt;
+      sw += wt;
+    }
+  }
+  float inv = 1.0f / sw;  /* sw > 0: the centre always counts */
+  op[0] = sr * inv; op[1] = sg * inv; op[2] = sb * inv; op[3] = sa * inv; op[4] = sv * inv * inv;
 }
 
 #endif

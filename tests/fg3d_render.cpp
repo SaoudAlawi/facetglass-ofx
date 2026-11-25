@@ -19,6 +19,21 @@
 
 using namespace fg3d;
 
+// Calls fn(i) for i in [b, e) on all cores (interleaved rows balance the load).
+struct ParallelRows {
+    template <class Fn>
+    void operator()(int b, int e, Fn fn) const
+    {
+        const unsigned nt = std::max(1u, std::thread::hardware_concurrency());
+        std::vector<std::thread> pool;
+        for (unsigned t = 0; t < nt; ++t)
+            pool.emplace_back([&, t] {
+                for (int i = b + (int)t; i < e; i += (int)nt) fn(i);
+            });
+        for (auto& th : pool) th.join();
+    }
+};
+
 int main(int argc, char** argv)
 {
     if (argc < 5) {
@@ -51,15 +66,8 @@ int main(int argc, char** argv)
     makeParams(ui, 0, 0, (float)W, (float)H, time, scene, p);
     p.srcW = p.glsW = W; p.srcH = p.glsH = H; p.srcLevels = p.glsLevels = levels; p.useSource = 0;
 
-    const unsigned nt = std::max(1u, std::thread::hardware_concurrency());
-    std::vector<std::thread> pool;
-    for (unsigned t = 0; t < nt; ++t)
-        pool.emplace_back([&, t] {
-            for (int y = (int)t; y < H; y += (int)nt)   // interleaved rows balance the load
-                shadeCPU(p, pyr.data(), pyr.data(), scene, 0, W, y, y + 1,
-                         [&](int yy) { return &out[(size_t)yy * W * 4]; });
-        });
-    for (auto& th : pool) th.join();
+    renderCPU(p, pyr.data(), pyr.data(), scene, 0, W, 0, H, ParallelRows{},
+              [&](int yy) { return &out[(size_t)yy * W * 4]; });
     auto t2 = std::chrono::steady_clock::now();
 
     f = std::fopen(argv[2], "wb");

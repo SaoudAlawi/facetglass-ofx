@@ -32,7 +32,8 @@ LOOKS = {
                                seed=3, fstop=2.0),
     "water_drops": dict(shape=35, facets=4, prismAngle=8, size=1.4, depth=0.12, **SHARP),
 }
-QUALITY = {"draft": (4, 8, 0.05), "good": (16, 64, 0.025), "final": (48, 384, 0.008)}
+QUALITY = {"draft": (4, 8, 0.05), "good": (16, 64, 0.025), "final": (48, 384, 0.008),
+           "good+denoise": (16, 64, 0.025, 0.5), "draft+denoise": (4, 8, 0.05, 0.5)}
 REF = (512, 512, 0.0)
 
 
@@ -41,8 +42,10 @@ def fmt(v):
 
 
 def render(name, kw, q):
-    o = os.path.join(OUT, f"{name}_{q[0]}_{q[1]}.raw")
+    o = os.path.join(OUT, f"{name}_{'_'.join(str(v) for v in q)}.raw")
     args = [f"{k}={fmt(v)}" for k, v in kw.items()] + [f"minSamples={q[0]}", f"maxSamples={q[1]}", f"noise={q[2]}"]
+    if len(q) > 3:
+        args.append(f"denoise={q[3]}")
     r = subprocess.run([exe, inp, o, str(W), str(H)] + args, capture_output=True, text=True, check=True)
     ms = float(r.stdout.split("render")[1].split("ms")[0])
     return np.fromfile(o, np.float32).reshape(H, W, 4)[::-1], ms
@@ -77,4 +80,4 @@ for name, kw in LOOKS.items():
     strip = np.concatenate([c[60:210, 120:360] for c in crops], 1)
     Image.fromarray((strip * 255 + 0.5).astype(np.uint8)).save(os.path.join(OUT, f"{tag}_{name}.png"))
 print(f"{'mean RMS':20s} " + " ".join(f"{np.mean(v):>16.4f}" for v in totals.values()))
-print("crops (reference | draft | good | final):", OUT)
+print("crops (reference | " + " | ".join(QUALITY) + "):", OUT)

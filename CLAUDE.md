@@ -18,7 +18,7 @@ Done and verified:
 3. **OFX plugin** (`src/plugin/FacetGlassPlugin.cpp`, v1.1): groups Shape / Placement / Glass / Optics / Outside Frame / Lights / Motion / Look / Technical; optional Refract Source (General context); full-source RoI; scene cached per instance; **CUDA render on the host's stream** when offered, multithreaded CPU otherwise. Static MSVC + CUDA runtimes.
 4. **Tests**:
    - `fg3d_gpu_test`: CUDA vs CPU on 8 looks + negative stride + 2x refract source; must be exact (currently 0 difference). RTX 2080 Ti: 12–20x faster than CPU.
-   - `tests/compare_ofx.py`: the built bundle in the HostSupport test host (`tests/ofxhost/fg_ofxhost.cpp`) vs the standalone renderer (`fg3d_render`): 19 checks (8 looks, tiles, negative rowBytes, render scale 0.5, quality presets, wobble + lights, Refract Source, custom OBJ, identity). All exact. Text params are passed to the host as `name:=text`.
+   - `tests/compare_ofx.py`: the built bundle in the HostSupport test host (`tests/ofxhost/fg_ofxhost.cpp`) vs the standalone renderer (`fg3d_render`): 23 checks (10 looks incl. 2 denoised, tiles plain and denoised, negative rowBytes, render scale 0.5, quality presets, wobble + lights, Refract Source, custom OBJ, a host without the message suite, identity). All exact. Text params are passed to the host as `name:=text`.
    - `fg3d_math_test`: accuracy of the portable maths.
    - `tests/fg3d_preview.py`: contact sheet of looks for eyeballing (`tests/out/fg3d/contact_sheet.png`).
 5. Legacy v1 (thin-glass) core `src/core/fg_core.h` + `tests/compare_core.py` + the Fuse in `reference/` remain as a reference only; the plugin no longer uses them.
@@ -49,7 +49,7 @@ Host quirks learned in Resolve: never call `setPersistentMessage` / `clearPersis
 
 1. **Resolve test of v1.1** (CUDA mode): Edit, Color and Fusion pages; check every shape, the Refract Source input, proxy/half resolution, Deliver.
 2. **On-screen gizmo**: done (colour-coded handles, works in Resolve with Open FX Overlay on the Color/Edit page).
-3. **Look polish** against the public demo: bevel quality, split diopter behaviour, the "turned back" environment. (Grain: done, see fg3d_noise.py; next step would be a denoiser or more samples on GPU.)
+3. **Look polish** against the public demo: bevel quality, split diopter behaviour, the "turned back" environment. (Grain and denoiser: done, see fg3d_noise.py.)
 4. **Presets** (our own names) and saved defaults; a global Final-quality switch.
 5. **HDRI/EXR world**, more than 2 lights in the UI. (OBJ import is done; try it in Resolve with a Blender export.)
 6. **Recorded hand-held motion** (CSV pose import, loop/hold/ease).
@@ -66,6 +66,7 @@ Host quirks learned in Resolve: never call `setPersistentMessage` / `clearPersis
 - Reflections: at outer (entering) surfaces the reflection is a weighted one-bounce environment lookup (`F * reflection`) and the path continues by refraction with throughput `1 - F`; TIR reflects deterministically; internal partial reflections are not traced. No random reflect/refract choice (it produced sparkle noise).
 - Dispersion: wavelength per sample (golden-ratio sequence over 400–700 nm), Cauchy-like IOR offset, per-channel normalised weights so white stays white.
 - Sampling: one 5-D Kronecker sequence (generalised golden ratio, alpha_k = phi5^-k) for pixel jitter, aperture (concentric disc mapping) and wavelength; per-pixel offsets from interleaved gradient noise so residual error is blue-ish. Adaptive stopping uses per-channel Welford error relative to sqrt(luminance), so dispersion colour noise keeps sampling.
+- **Denoiser** (`fg3d_atrous`, Technical > Denoise, default 0.5 -> sigma 2.75): 4 edge-aware a-trous passes (steps 1-8) over a region padded by 30 px, so tiles match full frames exactly. Guides from `fg3d_trace` aux: variance of the weighted mean (prefiltered 3x3, SVGF-style), glass coverage, first-hit normal, landing position, and **landing spread** in pixels; pixels whose rays land within 1.5 px are sharp (anti-aliasing, not grain) and pass through untouched. Colour agreement is judged on compressed luminance l/(1+l) so bokeh highlights smooth. 2026-11-26: Good 0.0245 -> 0.0208 average (gem 0.044 -> 0.031), Draft 0.064 -> 0.049.
 - Grain metric: `python tests/fg3d_noise.py build/Release/fg3d_render.exe <tag>` (RMS vs a 512-spp reference, crops in tests/out/noise). 2026-11-26: Good 0.042 -> 0.0245, Final 0.0105 -> 0.0050. Remaining grain is mostly depth of field through facets plus dispersion.
 - Kernel coding rules (GPU portability and bit-exactness): float only (`f` suffix), scalar maths and the fgv3/fgv4 structs, no recursion, no global/constant arrays (private arrays like the BVH stack are fine), no textures, no identifiers that are keywords somewhere (`in`, `sample`, `half`), no library exp/log/sin/cos (use the core's), and compile without FMA contraction (`--fmad=false`, MSVC `/fp:precise`).
 

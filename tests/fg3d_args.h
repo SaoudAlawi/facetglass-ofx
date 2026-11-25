@@ -67,6 +67,7 @@ inline bool applyArg(UIParams& ui, double& time, const char* arg)
     else if (k == "boost") ui.boost = x;
     else if (k == "threshold") ui.threshold = x;
     else if (k == "mix") ui.mix = x;
+    else if (k == "denoise") ui.denoise = x;
     else if (k == "seed") { ui.seed = (int)x; ui.shape.seed = (int)x; }
     else if (k == "wobble") ui.wobble = x;
     else if (k == "wobbleSpeed") ui.wobbleSpeed = x;
