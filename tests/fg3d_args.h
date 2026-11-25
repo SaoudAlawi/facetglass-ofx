@@ -28,6 +28,7 @@ inline bool applyArg(UIParams& ui, double& time, const char* arg)
     const char* eq = std::strchr(arg, '=');
     if (!eq) return false;
     std::string k(arg, eq - arg);
+    if (k == "obj") { ui.shape.objPath = eq + 1; return true; }
     std::vector<double> v = nums(eq + 1);
     if (v.empty()) return false;
     const double x = v[0];
@@ -39,6 +40,7 @@ inline bool applyArg(UIParams& ui, double& time, const char* arg)
     else if (k == "power") ui.shape.power = (float)x;
     else if (k == "thickness") ui.shape.thickness = (float)x;
     else if (k == "detail") ui.shape.detail = (int)x;
+    else if (k == "smoothAngle") ui.shape.smoothAngleDeg = (float)x;
     else if (k == "center" && v.size() >= 2) { ui.centerX = v[0]; ui.centerY = v[1]; }
     else if (k == "depth") ui.depth = x;
     else if (k == "rotX") ui.rotX = x;

@@ -13,49 +13,97 @@ extern "C" {
 
 namespace fg3d {
 
+// Shape ids are stored in saved projects: from the first release on, only append.
 enum Shape {
+    // Prisms and filters
     kFacetPlate = 0,   // flat plate with stepped facets on the back (ghost repeats)
     kWedgePrism,       // classic triangular glass prism bar
-    kRadialPrism,      // N-sided disc, conical facets around a clear centre
-    kSplitDiopter,     // half of a plano-convex lens with a straight cut edge
+    kRadialPrism,      // N-sided disc, conical facets around a clear centre (multi-image)
+    kHalfRadial,       // radial prism faceted on one half only
+    kKaleidoscope,     // polygonal glass rod seen end-on (internal mirror images)
+    kHaloRing,         // clear centre with a smooth conical ring
+    kRippleRings,      // concentric water ripples
+    kHalfRipple,       // ripples on one half of a disc
+    kHoneycomb,        // disc of hexagonal lenslets
+    kFresnelLens,      // flat lens made of concentric stepped zones
+    // Lenses
     kRoundDiopter,     // plano-convex (or concave) round lens
-    kGeoSphere,        // faceted geodesic sphere
-    kGem,              // round cut gem: table, crown, girdle, pavilion
+    kSplitDiopter,     // half of a round lens with a straight cut edge
+    kDoubleConvex,     // lens curved on both faces
+    kCylinderLens,     // lens curved in one direction only
+    kRod,              // smooth glass cylinder
+    // Gems
+    kGem,              // round brilliant
+    kEmeraldCut,
+    kPrincessCut,
+    kPearCut,
+    kHeartCut,
+    kMarquiseCut,
     kCrystalCluster,   // several pointed hexagonal crystals
+    // Solids
+    kTetrahedron,
     kBox,
+    kOctahedron,
+    kDodecahedron,
+    kIcosahedron,
+    kGeoSphere,        // faceted geodesic sphere (Detail = subdivisions)
+    kBall,             // smooth sphere
     kPyramid,
-    kRod,              // smooth glass cylinder (cylindrical lens)
+    kHexPrism,
+    kTorus,
+    // Organic
+    kWavyGlass,
+    kFlutedGlass,      // shower glass with vertical flutes
+    kBubbleGlass,      // dimpled glass
+    kWaterDrops,       // drops on a pane
+    kIceCube,
+    kMeltedBlob,
+    kShards,           // broken pieces
+    kTwistedBar,
+    kBentSlab,
+    // Custom
+    kCustomOBJ,
     kShapeCount
 };
 
 const char* shapeName(int shape);
+const char* shapeCategory(int shape);
 
 struct Mesh {
     std::vector<float> v;    // xyz per vertex
-    std::vector<int> f;      // 3 vertex indices per triangle
+    std::vector<int> f;      // 3 vertex indices per triangle, counter-clockwise seen from outside
     std::vector<int> group;  // per triangle: 0 = flat face, >0 = smooth group
+    float smoothAngleDeg = 180.0f;  // edges within a group are smooth only below this angle
+    bool trustWinding = false;      // generator guarantees outward winding (skip the parity fix)
     int addV(float x, float y, float z);
     void tri(int a, int b, int c, int g = 0);
     void quad(int a, int b, int c, int d, int g = 0);  // a-b-c-d counter-clockwise seen from outside
 };
 
 struct ShapeParams {
-    int shape = kFacetPlate;
+    int shape = kGem;
     int facets = 3;
     bool bothSides = false;
-    float prismAngleDeg = 8.0f;
-    float clearCentre = 0.35f;
-    float power = 2.0f;
+    float prismAngleDeg = 6.0f;
+    float clearCentre = 0.4f;
+    float power = 4.0f;
     float thickness = 0.3f;   // relative
     int detail = 1;
     int seed = 1;
-    // World units per object unit (see objectScale). Lens curvature is defined in
-    // world terms so Diopter Power means the same thing at any size or depth.
+    float smoothAngleDeg = 30.0f;  // custom OBJ shading
+    std::string objPath;           // custom OBJ file
+    // World units per object unit (see objectScale) and object depth: lens
+    // curvature is solved so Diopter Power means the same at any size or depth.
     float worldScale = 0.05f;
-    float depth = 0.15f;      // object distance from the lens (footage at 1)
+    float depth = 0.15f;
 };
 
-Mesh makeShape(const ShapeParams& sp);
+bool operator==(const ShapeParams& a, const ShapeParams& b);
+
+// Builds the mesh for a shape. For kCustomOBJ an unreadable file gives an empty
+// mesh and an error text in `err` (if given).
+Mesh makeShape(const ShapeParams& sp, std::string* err = nullptr);
+
 
 struct SceneBuffers {
     std::vector<float> tris;    // FG_TRI_FLOATS per triangle, BVH leaf order

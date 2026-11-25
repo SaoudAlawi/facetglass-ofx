@@ -38,7 +38,7 @@ MAP = dict(shape=("shape", "shape"), facets=("facets", "facets"), bothSides=("bo
            wobble=("wobble", "wobble"), wobbleSpeed=("wobbleSpeed", "wobbleSpeed"), boost=("boost", "highlightBoost"),
            threshold=("threshold", "highlightThreshold"), mix=("mix", "mix"),
            colorSpace=("colorSpace", "inputColorSpace"))
-BASE = dict(shape=6, facets=3, bothSides=0, prismAngle=6.0, clearCentre=0.4, power=4.0, thickness=0.3, detail=1,
+BASE = dict(shape=15, facets=3, bothSides=0, prismAngle=6.0, clearCentre=0.4, power=4.0, thickness=0.3, detail=1,
             seed=1, center=(0.5, 0.5), depth=0.15, rotX=0.0, rotY=0.0, rotZ=0.0, size=0.7, ior=1.55,
             dispersion=0.4, reflection=1.0, roughness=0.0, bevelWidth=0.02, bevelAngle=20.0, maxBounces=12,
             fstop=4.0, focus=1.0, glassFocus=1.0, world=0, worldBlur=4.0, feather=0.05, wobble=0.0,
@@ -50,12 +50,12 @@ LOOKS = {
     "gem": dict(rotX=-35, rotY=15, ior=2.0, focus=0.05, fstop=5.6),
     "faceted_plate": dict(shape=0, facets=3, bothSides=1, size=0.9, depth=0.12, rotZ=12),
     "radial_prism": dict(shape=2, facets=6, prismAngle=7, clearCentre=0.5, size=1.6),
-    "round_diopter": dict(shape=4, power=6, center=(0.5, 0.6), dispersion=0.6, depth=0.2),
-    "split_diopter": dict(shape=3, power=4, size=2.5, rotZ=180, focus=0.5, glassFocus=1.0, fstop=2.0),
-    "crystal_cluster": dict(shape=7, facets=7, size=1.2, center=(0.3, 0.4), ior=1.7, seed=3, roughness=0.2,
+    "round_diopter": dict(shape=10, power=6, center=(0.5, 0.6), dispersion=0.6, depth=0.2),
+    "split_diopter": dict(shape=11, power=4, size=2.5, rotZ=180, focus=0.5, glassFocus=1.0, fstop=2.0),
+    "crystal_cluster": dict(shape=21, facets=7, size=1.2, center=(0.3, 0.4), ior=1.7, seed=3, roughness=0.2,
                             focus=0.05, fstop=5.6),
-    "box_slog3": dict(shape=8, size=0.6, depth=0.25, rotX=25, rotY=35, focus=0.0, fstop=8, colorSpace=3),
-    "sphere_transparent": dict(shape=5, detail=2, size=0.8, depth=0.2, world=5, worldBlur=2.0),
+    "box_slog3": dict(shape=23, size=0.6, depth=0.25, rotX=25, rotY=35, focus=0.0, fstop=8, colorSpace=3),
+    "sphere_transparent": dict(shape=27, detail=2, size=0.8, depth=0.2, world=5, worldBlur=2.0),
 }
 
 

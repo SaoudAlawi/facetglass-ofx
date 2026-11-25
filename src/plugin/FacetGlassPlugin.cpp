@@ -45,6 +45,8 @@
 #define P_THICK "thickness"
 #define P_DETAIL "detail"
 #define P_SEED "seed"
+#define P_SMOOTH "smoothAngle"
+#define P_OBJ "objFile"
 #define P_CENTER "center"
 #define P_DEPTH "depth"
 #define P_TILT "tilt"
@@ -100,12 +102,32 @@ OfxRectI toPixelEnclosing(const OfxRectD& r, const OfxPointD& rs, double par)
     return p;
 }
 
-bool sameShape(const fg3d::ShapeParams& a, const fg3d::ShapeParams& b)
+// Which Shape controls matter for each shape (for enabling them in the UI).
+struct ShapeUse { bool facets, both, prism, clear, power, thick, detail, seed, smooth, obj; };
+ShapeUse shapeUse(int s)
 {
-    return a.shape == b.shape && a.facets == b.facets && a.bothSides == b.bothSides &&
-           a.prismAngleDeg == b.prismAngleDeg && a.clearCentre == b.clearCentre && a.power == b.power &&
-           a.thickness == b.thickness && a.detail == b.detail && a.seed == b.seed &&
-           a.worldScale == b.worldScale && a.depth == b.depth;
+    using namespace fg3d;
+    ShapeUse u = {};
+    switch (s) {
+    case kFacetPlate: u.facets = u.both = u.prism = u.thick = true; break;
+    case kWedgePrism: case kBox: case kHexPrism: u.thick = true; break;
+    case kRadialPrism: case kHalfRadial: u.facets = u.prism = u.clear = u.thick = true; break;
+    case kKaleidoscope: u.facets = u.thick = true; break;
+    case kHaloRing: u.prism = u.clear = u.thick = true; break;
+    case kRippleRings: case kHalfRipple: case kHoneycomb: u.facets = u.prism = u.thick = true; break;
+    case kFresnelLens: u.facets = u.power = u.thick = true; break;
+    case kRoundDiopter: case kSplitDiopter: case kDoubleConvex: case kCylinderLens: u.power = u.thick = true; break;
+    case kCrystalCluster: case kShards: u.facets = u.seed = true; break;
+    case kGeoSphere: u.detail = true; break;
+    case kWavyGlass: case kFlutedGlass: case kBubbleGlass: case kWaterDrops:
+        u.facets = u.prism = u.thick = u.seed = true; break;
+    case kIceCube: case kMeltedBlob: u.seed = true; break;
+    case kTwistedBar: u.prism = true; break;
+    case kBentSlab: u.prism = u.thick = true; break;
+    case kCustomOBJ: u.smooth = u.obj = true; break;
+    default: break;
+    }
+    return u;
 }
 
 }  // namespace
@@ -159,10 +181,11 @@ private:
 
     ChoiceParam *_shape, *_world, *_cspace, *_quality;
     IntParam *_facets, *_detail, *_seed, *_bounces, *_minS, *_maxS;
+    StringParam* _obj;
     BooleanParam* _both;
     DoubleParam *_prism, *_clear, *_power, *_thick, *_depth, *_tilt, *_turn, *_roll, *_size, *_ior, *_disp, *_refl,
         *_rough, *_bevel, *_bevAng, *_fstop, *_focus, *_gfocus, *_wblur, *_feather, *_wobble, *_wspeed, *_boost,
-        *_thresh, *_mix, *_noise;
+        *_thresh, *_mix, *_noise, *_smooth;
     Double2DParam* _center;
     Double2DParam* _lpos[kNumLights];
     DoubleParam *_ldepth[kNumLights], *_lsize[kNumLights], *_lkelvin[kNumLights], *_lint[kNumLights];
@@ -187,6 +210,8 @@ FacetGlassPlugin::FacetGlassPlugin(OfxImageEffectHandle handle) : ImageEffect(ha
     _detail = fetchIntParam(P_DETAIL);
     _seed = fetchIntParam(P_SEED);
     _bounces = fetchIntParam(P_BOUNCES);
+    _obj = fetchStringParam(P_OBJ);
+    _smooth = fetchDoubleParam(P_SMOOTH);
     _minS = fetchIntParam(P_MINS);
     _maxS = fetchIntParam(P_MAXS);
     _both = fetchBooleanParam(P_BOTH);
@@ -233,23 +258,25 @@ void FacetGlassPlugin::updateVisibility()
     _minS->setIsSecret(!custom);
     _maxS->setIsSecret(!custom);
     _noise->setIsSecret(!custom);
-    const int s = choiceAt(_shape, 0.0);
-    const bool facets = s == fg3d::kFacetPlate || s == fg3d::kRadialPrism || s == fg3d::kCrystalCluster;
-    const bool prism = s == fg3d::kFacetPlate || s == fg3d::kRadialPrism;
-    const bool lens = s == fg3d::kSplitDiopter || s == fg3d::kRoundDiopter;
-    _facets->setEnabled(facets);
-    _both->setEnabled(s == fg3d::kFacetPlate);
-    _prism->setEnabled(prism);
-    _clear->setEnabled(s == fg3d::kRadialPrism);
-    _power->setEnabled(lens);
-    _detail->setEnabled(s == fg3d::kGeoSphere);
-    _thick->setEnabled(s == fg3d::kFacetPlate || s == fg3d::kRadialPrism || s == fg3d::kWedgePrism ||
-                       s == fg3d::kBox || lens);
+    const ShapeUse u = shapeUse(choiceAt(_shape, 0.0));
+    _facets->setEnabled(u.facets);
+    _both->setEnabled(u.both);
+    _prism->setEnabled(u.prism);
+    _clear->setEnabled(u.clear);
+    _power->setEnabled(u.power);
+    _thick->setEnabled(u.thick);
+    _detail->setEnabled(u.detail);
+    _smooth->setEnabled(u.smooth);
+    _obj->setEnabled(u.obj);
 }
 
 void FacetGlassPlugin::changedParam(const InstanceChangedArgs&, const std::string& name)
 {
     if (name == P_QUALITY || name == P_SHAPE) updateVisibility();
+    if (name == P_OBJ) {
+        std::lock_guard<std::mutex> lock(_sceneMutex);
+        _scene.reset();  // the file may have changed on disk
+    }
 }
 
 void FacetGlassPlugin::readUI(double t, fg3d::UIParams& ui)
@@ -263,6 +290,8 @@ void FacetGlassPlugin::readUI(double t, fg3d::UIParams& ui)
     ui.shape.thickness = (float)_thick->getValueAtTime(t);
     ui.shape.detail = _detail->getValueAtTime(t);
     ui.seed = ui.shape.seed = _seed->getValueAtTime(t);
+    ui.shape.smoothAngleDeg = (float)_smooth->getValueAtTime(t);
+    if (ui.shape.shape == fg3d::kCustomOBJ) _obj->getValue(ui.shape.objPath);
     const OfxPointD c = pointAt(_center, t);
     ui.centerX = c.x; ui.centerY = c.y;
     ui.depth = _depth->getValueAtTime(t);
@@ -312,7 +341,9 @@ void FacetGlassPlugin::readUI(double t, fg3d::UIParams& ui)
     ui.shape.worldScale = (float)fg3d::objectScale(ui);
     ui.shape.depth = (float)ui.depth;
     // Only lenses depend on scale and depth: keep other shapes' cache keys stable.
-    if (ui.shape.shape != fg3d::kSplitDiopter && ui.shape.shape != fg3d::kRoundDiopter) {
+    const int sh = ui.shape.shape;
+    if (sh != fg3d::kSplitDiopter && sh != fg3d::kRoundDiopter && sh != fg3d::kDoubleConvex &&
+        sh != fg3d::kCylinderLens && sh != fg3d::kFresnelLens) {
         ui.shape.worldScale = 0.0f;
         ui.shape.depth = 0.0f;
     }
@@ -321,9 +352,12 @@ void FacetGlassPlugin::readUI(double t, fg3d::UIParams& ui)
 std::shared_ptr<const fg3d::SceneBuffers> FacetGlassPlugin::scene(const fg3d::UIParams& ui)
 {
     std::lock_guard<std::mutex> lock(_sceneMutex);
-    if (!_scene || !sameShape(_sceneKey, ui.shape) || _sceneBevel != (float)ui.bevelAngle) {
+    if (!_scene || !(_sceneKey == ui.shape) || _sceneBevel != (float)ui.bevelAngle) {
         auto s = std::make_shared<fg3d::SceneBuffers>();
-        fg3d::buildScene(fg3d::makeShape(ui.shape), (float)ui.bevelAngle, *s);
+        std::string err;
+        fg3d::buildScene(fg3d::makeShape(ui.shape, &err), (float)ui.bevelAngle, *s);
+        if (!err.empty()) setPersistentMessage(Message::eMessageWarning, "", "FacetGlass: " + err);
+        else clearPersistentMessage();
         _scene = s;
         _sceneKey = ui.shape;
         _sceneBevel = (float)ui.bevelAngle;
@@ -570,10 +604,13 @@ void FacetGlassFactory::describeInContext(ImageEffectDescriptor& desc, ContextEn
         c->setDefault(fg3d::kGem);
         finish(c, "Shape", "The glass object held in front of the lens.", gs);
     }
-    intp(desc, P_FACETS, "Facets", "Faceted Plate: steps. Radial Prism: sides. Crystal Cluster: crystals.", gs, 3, 1,
-         12, 1, 64);
+    intp(desc, P_FACETS, "Facets",
+         "Count for the shape: plate steps, prism sides, ripples, honeycomb cells, Fresnel zones, crystals, "
+         "shards, flutes, bubbles or drops.", gs, 3, 1, 12, 1, 64);
     finish(desc.defineBooleanParam(P_BOTH), "Both Sides", "Faceted Plate: facets on both sides of the centre.", gs);
-    dbl(desc, P_PRISM, "Prism Angle", "Faceted Plate / Radial Prism: facet angle in degrees.", gs, 6.0, 0.0, 30.0, 0.0, 70.0);
+    dbl(desc, P_PRISM, "Prism Angle",
+        "Steepness for the shape (degrees): facet angle, ripple and lenslet strength, waviness, bend or twist.", gs,
+        6.0, 0.0, 30.0, 0.0, 70.0);
     dbl(desc, P_CLEAR, "Clear Centre", "Radial Prism: size of the flat centre.", gs, 0.4, 0.0, 0.95, 0.0, 0.95);
     dbl(desc, P_POWER, "Diopter Power",
         "Diopters: magnification through the lens centre (+10 = 2x). Negative values shrink.", gs, 4.0, -10.0, 10.0,
@@ -581,6 +618,16 @@ void FacetGlassFactory::describeInContext(ImageEffectDescriptor& desc, ContextEn
     dbl(desc, P_THICK, "Thickness", "Thickness of plates, prisms and lenses.", gs, 0.3, 0.05, 1.0, 0.02, 3.0);
     intp(desc, P_DETAIL, "Detail", "Geodesic Sphere: subdivisions (more = rounder).", gs, 1, 0, 4, 0, 4);
     intp(desc, P_SEED, "Seed", "Variation of random shapes and of the sampling noise.", gs, 1, 0, 100, 0, 100000);
+    {
+        StringParamDescriptor* o = desc.defineStringParam(P_OBJ);
+        o->setStringType(eStringTypeFilePath);
+        o->setFilePathExists(true);
+        o->setDefault("");
+        o->setAnimates(false);
+        finish(o, "OBJ File", "Custom OBJ: a .obj model (e.g. exported from Blender). It is centred and scaled.", gs);
+    }
+    dbl(desc, P_SMOOTH, "Smooth Angle", "Custom OBJ: edges flatter than this angle (degrees) are shaded smooth.", gs,
+        30.0, 0.0, 180.0, 0.0, 180.0);
 
     // ---------------------------------------------------------------- Placement
     GroupParamDescriptor* gp = group(desc, "placementGroup", "Placement");

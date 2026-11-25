@@ -16,6 +16,7 @@
 //              [--time <t>]                      frame number (default 0)
 //              [--negstride]                     store images top-down (negative rowBytes)
 //              [name=value | name=x,y ...]       parameter values by script name
+//              [name:=text]                      text parameter (e.g. a file path)
 //
 // Raw images are float32 RGBA, row 0 = bottom row (OFX y-up). The output has the
 // same layout. Diagnostics go to stdout as "key: value" lines.
@@ -116,6 +117,7 @@ struct Options {
     double time = 0.0;
     bool negStride = false;
     std::vector<std::pair<std::string, std::vector<double>>> params;
+    std::vector<std::pair<std::string, std::string>> strParams;  // name:=text
 };
 
 static Options g_opt;
@@ -262,6 +264,17 @@ public:
     OfxStatus set(OfxTime, double x, double y) override { return set(x, y); }
 };
 
+class StringP : public OH::Param::StringInstance {
+public:
+    StringP(OH::Param::Descriptor& d, OH::Param::SetInstance* s)
+        : OH::Param::StringInstance(d, s), _v(d.getProperties().getStringProperty(kOfxParamPropDefault)) {}
+    OfxStatus get(std::string& v) override { v = _v; return kOfxStatOK; }
+    OfxStatus get(OfxTime, std::string& v) override { v = _v; return kOfxStatOK; }
+    OfxStatus set(const char* v) override { _v = v; return kOfxStatOK; }
+    OfxStatus set(OfxTime, const char* v) override { _v = v; return kOfxStatOK; }
+    std::string _v;
+};
+
 ////////////////////////////////////////////////////////////////////////////////
 // Effect instance
 
@@ -310,6 +323,7 @@ public:
         if (t == kOfxParamTypeBoolean) return new BoolP(d, this);
         if (t == kOfxParamTypeChoice) return new ChoiceP(d, this);
         if (t == kOfxParamTypeDouble2D) return new Double2DP(d, this);
+        if (t == kOfxParamTypeString) return new StringP(d, this);
         if (t == kOfxParamTypeGroup) return new OH::Param::GroupInstance(d, this);
         if (t == kOfxParamTypePage) return new OH::Param::PageInstance(d, this);
         fail("unsupported parameter type " + t + " for " + d.getName());
@@ -491,6 +505,10 @@ static void parseArgs(int argc, char** argv)
         else if (a == "--tiles") { need(1); o.tiles = std::max(1, std::atoi(argv[++i])); }
         else if (a == "--time") { need(1); o.time = std::atof(argv[++i]); }
         else if (a == "--negstride") { o.negStride = true; }
+        else if (a.find(":=") != std::string::npos) {
+            const size_t eq = a.find(":=");
+            o.strParams.emplace_back(a.substr(0, eq), a.substr(eq + 2));
+        }
         else if (a.find('=') != std::string::npos) {
             const size_t eq = a.find('=');
             o.params.emplace_back(a.substr(0, eq), parseNumbers(a.substr(eq + 1)));
@@ -545,6 +563,11 @@ int main(int argc, char** argv)
     if (!inst) fail("createInstance failed for context " + o.context);
 
     for (const auto& kv : o.params) setParam(*inst, kv.first, kv.second);
+    for (const auto& kv : o.strParams) {
+        auto* sp = dynamic_cast<StringP*>(inst->getParam(kv.first));
+        if (!sp) fail("no text parameter named " + kv.first);
+        sp->set(kv.second.c_str());
+    }
 
     check(inst->createInstanceAction(), "createInstanceAction");
     if (!inst->getClipPreferences()) fail("getClipPreferences failed");
