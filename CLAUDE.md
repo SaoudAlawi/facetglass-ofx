@@ -17,7 +17,6 @@ Done and verified:
 2. **Portable core** (`src/core/`): `fg_params.h` (a plain-C parameter block, all 4-byte fields), `fg_core.h` (the shader, written against the macros FG_DEVICE / FG_GLOBAL / FG_PRIV / FG_SQRT …), and `fg_backend_cpu.h` (the CPU prelude). It reads images from **float RGBA buffers** with (x1, y1, w, h, strideInFloats), because OFX GPU render passes buffers, not textures. It handles render tiles and frame offsets.
 3. **Golden test**: `tests/compare_core.py` renders 9 presets through the Fuse kernel (`reference/kernel-harness`) and through the portable core, and requires a max abs difference under 1e-3. It currently passes at about 1e-7 (8e-5 on the mix=0 preset, from sampling). **Run it after any change to the core.**
 4. Vendored **OpenFX SDK** (`third_party/openfx`, BSD-3): headers, the C++ Support library, HostSupport (a host library, for a test host), and the `Examples/GPUGain` (CUDA/OpenCL/Metal render pattern) and `Examples/Basic` example plugins.
-
 5. **OFX plugin, CPU render** (`src/plugin/FacetGlassPlugin.cpp`): every parameter from the spec, optional Refract Source (General context, sampled by normalised position in its own frame), full-source RoI, wobble from time, multithreaded `fg_shade`. Static MSVC runtime.
 6. **OFX test host** (`tests/ofxhost/fg_ofxhost.cpp`, HostSupport + expat 2.6.4 via FetchContent): loads the bundle from one folder only (never the system OFX folders). `tests/compare_ofx.py` runs 18 checks: the 9 golden presets vs the Fuse kernel, 3x3 tiles, negative rowBytes, render scale 0.5, quality presets, wobble at frame 37, Refract Source at 1x and 2x resolution, and identity at mix 0. All pass (1.2e-7).
 
@@ -36,7 +35,7 @@ OFX plugin test (loads the built bundle in the test host; run after any plugin o
 ```bash
 python tests/compare_ofx.py build/<Release/>fg_ofxhost[.exe] build build/<Release/>fg_fuse_harness[.exe] build/<Release/>fg_core_equiv[.exe]
 ```
-On Windows, CMake ships with VS Build Tools (`...\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMakein\cmake.exe`); configure with `-G "Visual Studio 17 2022" -A x64`.
+On Windows, CMake ships with VS Build Tools (`...\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe`); configure with `-G "Visual Studio 17 2022" -A x64`.
 
 On Windows, use Visual Studio 2022 (MSVC) and the CUDA Toolkit for the GPU backend. Install the built plugin to:
 `C:\Program Files\Common Files\OFX\Plugins\FacetGlass.ofx.bundle\Contents\Win64\FacetGlass.ofx`
