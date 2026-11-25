@@ -20,6 +20,35 @@ if(FG_BUILD_TESTS)
   add_executable(fg_core_equiv tests/core_equiv.cpp)
 endif()
 
+option(FG_BUILD_OFXHOST "Build the OFX test host (tests/ofxhost, needs expat via FetchContent)" ON)
+if(FG_BUILD_TESTS AND FG_BUILD_OFXHOST)
+  include(FetchContent)
+  set(EXPAT_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+  set(EXPAT_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(EXPAT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(EXPAT_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+  set(EXPAT_BUILD_FUZZERS OFF CACHE BOOL "" FORCE)
+  set(EXPAT_BUILD_PKGCONFIG OFF CACHE BOOL "" FORCE)
+  set(EXPAT_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+  set(EXPAT_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(expat
+    URL https://github.com/libexpat/libexpat/releases/download/R_2_6_4/expat-2.6.4.tar.xz
+    URL_HASH SHA256=a695629dae047055b37d50a0ff4776d1d45d0a4c842cf4ccee158441f55ff7ee
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+  FetchContent_MakeAvailable(expat)
+
+  file(GLOB OFX_HOSTSUPPORT_SRC ${OFX_ROOT}/HostSupport/src/*.cpp)
+  add_executable(fg_ofxhost tests/ofxhost/fg_ofxhost.cpp ${OFX_HOSTSUPPORT_SRC})
+  target_include_directories(fg_ofxhost PRIVATE ${OFX_ROOT}/include ${OFX_ROOT}/HostSupport/include)
+  target_compile_definitions(fg_ofxhost PRIVATE OFX_SUPPORTS_MULTITHREAD XML_STATIC)
+  target_link_libraries(fg_ofxhost PRIVATE expat)
+  if(MSVC)
+    target_compile_definitions(fg_ofxhost PRIVATE _CRT_SECURE_NO_WARNINGS WINDOWS)
+  elseif(UNIX AND NOT APPLE)
+    target_link_libraries(fg_ofxhost PRIVATE dl pthread)
+  endif()
+endif()
+
 # ---------------------------------------------------------------- plugin
 # TODO (next step, see CLAUDE.md): add src/plugin/*.cpp + the OFX Support
 # library as a MODULE library named FacetGlass, output suffix ".ofx",

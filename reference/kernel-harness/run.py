@@ -31,13 +31,22 @@ def test_image():
     return img
 
 
-def params(**kw):
-    p = dict(shape=0, facets=1, symmetric=0, samples=32, edgeMode=1, useSource=0, seed=1,
-             center=(0.5, 0.5), angle=0.0, size=0.35, inner=0.35, prism=10.0, power=1.0,
-             ior=1.5, dispersion=0.3, fstop=4.0, focus=1.0, glassDist=0.05, dfocus=1.0,
-             boost=0.5, threshold=0.8, refl=0.0, light=(0.3, 0.75), lightSize=0.15,
-             lightInt=0.0, mix=1.0)
+# UI-level values (degrees, f-stop, 0..1 focus) used by the golden presets.
+DEFAULTS = dict(shape=0, facets=1, symmetric=0, samples=32, edgeMode=1, useSource=0, seed=1,
+                center=(0.5, 0.5), angle=0.0, size=0.35, inner=0.35, prism=10.0, power=1.0,
+                ior=1.5, dispersion=0.3, fstop=4.0, focus=1.0, glassDist=0.05, dfocus=1.0,
+                boost=0.5, threshold=0.8, refl=0.0, light=(0.3, 0.75), lightSize=0.15,
+                lightInt=0.0, mix=1.0)
+
+
+def ui(**kw):
+    p = dict(DEFAULTS)
     p.update(kw)
+    return p
+
+
+def params(**kw):
+    p = ui(**kw)
     zg = p.pop("glassDist")
     fstop = p.pop("fstop")
     focus = p.pop("focus")
