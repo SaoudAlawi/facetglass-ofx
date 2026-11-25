@@ -10,6 +10,9 @@
 #include <cfloat>
 #include <climits>
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -499,6 +502,31 @@ void FacetGlassPlugin::render(const RenderArguments& args)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// Overlay diagnostics: the first 300 events go to %TEMP%/FacetGlass_overlay.log
+// (hosts give no feedback when an overlay fails to draw).
+
+namespace {
+void overlayLog(const char* fmt, ...)
+{
+    static std::mutex mtx;
+    static int count = 0;
+    std::lock_guard<std::mutex> lock(mtx);
+    if (count >= 300) return;
+    ++count;
+    const char* tmp = std::getenv("TEMP");
+    const std::string path = std::string(tmp ? tmp : ".") + "/FacetGlass_overlay.log";
+    FILE* f = std::fopen(path.c_str(), count == 1 ? "w" : "a");
+    if (!f) return;
+    va_list ap;
+    va_start(ap, fmt);
+    std::vfprintf(f, fmt, ap);
+    va_end(ap);
+    std::fputc('\n', f);
+    std::fclose(f);
+}
+}  // namespace
+
+////////////////////////////////////////////////////////////////////////////////
 // Viewer overlay: drag the centre dot to move, the ring to roll, inside the ring
 // to turn/tilt, the square to resize, and light dots to move lights.
 
@@ -521,6 +549,7 @@ public:
         addParamToSlaveTo(_center);
         addParamToSlaveTo(_size);
         addParamToSlaveTo(_roll);
+        overlayLog("overlay created");
     }
 
     bool draw(const DrawArgs& args) override;
@@ -529,13 +558,31 @@ public:
     bool penUp(const PenArgs& args) override;
 
 private:
+    bool penMotionImpl(const PenArgs& args);
+    bool penDownImpl(const PenArgs& args);
+    bool penUpImpl(const PenArgs& args);
     enum Part { kNone, kMove, kRoll, kSize, kSpin, kLight0 };
     struct Geo { double x1, y1, w, h, cx, cy, r; };
 
     Geo geo(double t) const
     {
         Geo g;
-        const OfxRectD rod = _src->getRegionOfDefinition(t);
+        // The clip RoD is not available in every action on every host: fall back
+        // to the project frame, which hosts always provide.
+        OfxRectD rod = { 0, 0, 0, 0 };
+        try {
+            rod = _src->getRegionOfDefinition(t);
+        } catch (...) {
+            rod.x2 = rod.x1 = 0;
+        }
+        if (rod.x2 - rod.x1 < 2 || rod.y2 - rod.y1 < 2) {
+            try {
+                OfxPointD off = _effect->getProjectOffset(), sz = _effect->getProjectSize();
+                rod = { off.x, off.y, off.x + sz.x, off.y + sz.y };
+            } catch (...) {
+                rod = { 0, 0, 1920, 1080 };
+            }
+        }
         g.x1 = rod.x1; g.y1 = rod.y1;
         g.w = std::max(rod.x2 - rod.x1, 1.0); g.h = std::max(rod.y2 - rod.y1, 1.0);
         const OfxPointD c = pointAt(_center, t);
@@ -637,7 +684,12 @@ private:
 
 bool GlassOverlay::draw(const DrawArgs& args)
 {
+    static int draws = 0;
+    try {
     const Geo g = geo(args.time);
+    if (draws++ < 5)
+        overlayLog("draw t=%g pixelScale=%g,%g rod=%g,%g %gx%g centre=%g,%g radius=%g", args.time, args.pixelScale.x,
+                   args.pixelScale.y, g.x1, g.y1, g.w, g.h, g.cx, g.cy, g.r);
     const double ps = args.pixelScale.x;
     glPushAttrib(GL_ALL_ATTRIB_BITS);
     glEnable(GL_BLEND);
@@ -650,10 +702,29 @@ bool GlassOverlay::draw(const DrawArgs& args)
     glPopMatrix();
     shapes(g, ps, args.time, false);
     glPopAttrib();
+    if (draws <= 5) overlayLog("draw done, GL error %d", (int)glGetError());
     return true;
+    } catch (const std::exception& e) {
+        overlayLog("draw exception: %s", e.what());
+    } catch (...) {
+        overlayLog("draw exception");
+    }
+    return false;
 }
 
 bool GlassOverlay::penMotion(const PenArgs& args)
+{
+    try {
+        return penMotionImpl(args);
+    } catch (const std::exception& e) {
+        overlayLog("penMotion exception: %s", e.what());
+    } catch (...) {
+        overlayLog("penMotion exception");
+    }
+    return false;
+}
+
+bool GlassOverlay::penMotionImpl(const PenArgs& args)
 {
     const Geo g = geo(args.time);
     if (_drag == kNone) {
@@ -687,8 +758,21 @@ bool GlassOverlay::penMotion(const PenArgs& args)
 
 bool GlassOverlay::penDown(const PenArgs& args)
 {
+    try {
+        return penDownImpl(args);
+    } catch (const std::exception& e) {
+        overlayLog("penDown exception: %s", e.what());
+    } catch (...) {
+        overlayLog("penDown exception");
+    }
+    return false;
+}
+
+bool GlassOverlay::penDownImpl(const PenArgs& args)
+{
     const Geo g = geo(args.time);
     const Part h = hit(args, g);
+    overlayLog("penDown at %g,%g part %d", args.penPosition.x, args.penPosition.y, (int)h);
     if (h == kNone) return false;
     _drag = h;
     _start = args.penPosition;
@@ -704,6 +788,18 @@ bool GlassOverlay::penDown(const PenArgs& args)
 }
 
 bool GlassOverlay::penUp(const PenArgs& args)
+{
+    try {
+        return penUpImpl(args);
+    } catch (const std::exception& e) {
+        overlayLog("penUp exception: %s", e.what());
+    } catch (...) {
+        overlayLog("penUp exception");
+    }
+    return false;
+}
+
+bool GlassOverlay::penUpImpl(const PenArgs& args)
 {
     if (_drag == kNone) return false;
     _drag = kNone;
