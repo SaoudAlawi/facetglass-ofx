@@ -1,12 +1,140 @@
 # FacetGlass
 
-Ray-traced virtual glass for DaVinci Resolve and other OpenFX hosts: prisms, ghost repeats, split and round diopters, and crystal facets. Real refraction, spectral dispersion, aperture-accurate soft edges and bokeh.
+**Ray-traced glass in front of the lens, for DaVinci Resolve and other OpenFX hosts.**
+Prisms, diopters, gems, crystals, ripple and kaleidoscope filters as real solid 3D
+glass objects: light refracts in, bounces around inside and comes out, with
+spectral dispersion, Fresnel reflections, bevelled edges catching the light, lens
+depth of field and virtual lights.
 
-**Status: in development.** The shared shading core is done and tested. The OpenFX plugin is next. A working Fusion Fuse preview is in `reference/fuse/`.
+Free and open source under the MIT licence.
 
-![Fuse v1 preview](docs/fuse_v1_preview.png)
+![FacetGlass shape library](docs/shapes.png)
 
-- Free and open source (MIT)
-- Windows (CUDA / OpenCL / CPU) first, then macOS (Metal)
+## Features
 
-See `CLAUDE.md` for the architecture and roadmap.
+- **Solid 3D glass, path-traced per pixel.** Snell refraction, total internal
+  reflection with a bounce limit, Fresnel reflections, rounded (bevelled) edges,
+  rough reflections, continuous spectral dispersion (rainbow edges).
+- **42 shapes** in six groups:
+  - *Prisms & filters*: faceted plate (ghost repeats), wedge prism, radial prism
+    (multi-image), half radial prism, kaleidoscope, halo ring, ripple rings
+    (water ripple), half ripple, honeycomb, Fresnel lens
+  - *Lenses*: round diopter, split diopter, double convex lens, cylinder lens, rod
+  - *Gems*: round brilliant, emerald, princess, pear, heart and marquise cuts,
+    crystal cluster
+  - *Solids*: tetrahedron, cube, octahedron, dodecahedron, icosahedron, geodesic
+    sphere, glass ball, pyramid, hexagonal prism, ring
+  - *Organic*: wavy glass, fluted (shower) glass, bubble glass, water drops, ice
+    cube, melted blob, shards, twisted bar, bent slab
+  - *Custom*: load any **.obj** model (e.g. exported from Blender)
+- **Real lens behaviour**: f-stop and focus (on the glass or on the footage), a
+  separate *Glass Focus* for split-diopter looks, highlight boost for bokeh.
+- **Placement in 3D**: position, depth, tilt, turn, roll and size, plus a
+  procedural **hand-held** motion.
+- **Outside the frame**: rays that leave the picture see a blurred, wrapped world
+  (spherical, mirror, repeat, clamp, black or transparent), with feathering.
+- **Virtual lights** with colour temperature that glint off the glass.
+- **Colour managed**: traces in linear light; input Rec.709, sRGB, Sony S-Log3,
+  ARRI LogC3 / LogC4, Panasonic V-Log or DaVinci Intermediate.
+- **Optional Refract Source** input: show a different clip through the glass.
+- **Fast on NVIDIA GPUs (CUDA)**, multithreaded CPU fallback. The CPU and GPU
+  produce bit-identical images.
+- **Low grain**: blue-noise low-discrepancy sampling, adaptive samples and an
+  edge-aware **denoiser** that keeps facet edges and sharp detail.
+
+## Viewer controls
+
+Select the FacetGlass node and set the viewer's on-screen controls to
+**Open FX Overlay** (Color or Edit page). Every handle is colour-coded and shows
+its value while you hover or drag:
+
+| Handle | Colour | Drag to |
+|---|---|---|
+| Centre dot | white | move the glass |
+| Arrows | red / green | move along x / y only |
+| Outer ring | blue | roll |
+| Tall / wide ellipse | red / green | tilt / turn |
+| Inside the ring | — | spin freely (trackball) |
+| Square on the ring | white | resize |
+| Left arc | purple | f-stop |
+| Right arc | orange | strength (index of refraction) |
+| Top arc | yellow | focus (glass ← → footage) |
+| Bar below | cyan | depth |
+| Suns | light colour | move the virtual lights |
+
+The render drops to draft quality while you drag and returns to full quality
+when you let go.
+
+## Install (Windows)
+
+1. Build the plugin (below) or take `FacetGlass.ofx.bundle` from a release.
+2. Copy the bundle to `C:\Program Files\Common Files\OFX\Plugins\` (needs admin),
+   or run `powershell -ExecutionPolicy Bypass -File tools\install_windows.ps1`.
+3. Restart DaVinci Resolve. FacetGlass appears under *OpenFX → FacetGlass*.
+
+Tips: set **Technical → Input Colour Space** to match your footage (keep your
+usual output transform after FacetGlass); use **Good** quality while working and
+**Final** for delivery; **Denoise** 0.5 is a good default.
+
+macOS (Apple Silicon, Metal) is planned.
+
+## Build from source
+
+Requirements: Visual Studio 2022 (MSVC), CMake 3.20+, optionally the CUDA Toolkit
+(13.x) for the GPU backend, and Python 3 with `numpy pillow scikit-image` for the
+tests.
+
+```bat
+set CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.5
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -T cuda="%CUDA_PATH%"
+cmake --build build --config Release --parallel
+```
+
+The plugin is written to `build/FacetGlass.ofx.bundle/Contents/Win64/FacetGlass.ofx`
+(static runtimes; it only depends on system DLLs and the NVIDIA driver). Without
+the CUDA Toolkit, configure without `-T cuda=...` to build the CPU-only plugin.
+
+## Tests
+
+```bat
+build\Release\fg3d_math_test.exe
+python tests/fg3d_preview.py build/Release/fg3d_render.exe 480 270
+build\Release\fg3d_gpu_test.exe tests\out\fg3d\in.raw 480 270
+python tests/compare_ofx.py build/Release/fg_ofxhost.exe build build/Release/fg3d_render.exe
+python tests/fg3d_noise.py build/Release/fg3d_render.exe
+```
+
+- `fg3d_gpu_test`: CUDA must match the CPU exactly (including tiles, negative row
+  strides, a 2x refract source and the denoiser).
+- `compare_ofx.py`: loads the built plugin in a small OpenFX test host
+  (`tests/ofxhost`) and checks it against the standalone renderer: shapes, tiles,
+  render scale, quality presets, lights, motion, Refract Source, OBJ import,
+  hosts without optional suites, identity.
+- `fg3d_noise.py`: measures grain against a high-sample reference.
+- `fg3d_preview.py`: renders the contact sheet above.
+
+## How it works
+
+- `src/core/fg3d_core.h` is the single source of the shading maths, compiled
+  unchanged for the CPU and CUDA (and later Metal) through a small prelude per
+  backend. It uses its own exp/log/sin/cos and no fused multiply-add, which keeps
+  every backend bit-identical.
+- `src/host/` builds the glass: procedural shapes, OBJ import, smoothing, bevel
+  data and a BVH; converts the UI values into the render parameters; runs the CPU
+  and CUDA passes (decode to linear, mip pyramid, trace, denoise, encode).
+- `src/plugin/FacetGlassPlugin.cpp` is the OpenFX plugin: parameters, clips,
+  scene cache, the viewer gizmo, and CUDA or CPU rendering.
+- `reference/` holds the first (thin-glass) model and a Fusion Fuse, kept as a
+  reference.
+
+## Clean room
+
+FacetGlass is an independent, clean-room project. Its algorithms and code are
+original. It was designed from first principles and from publicly available
+information only; no commercial plugin's code, binaries, presets or assets were
+used. Notes on what public demos show are in `docs/research/`.
+
+## Licence
+
+MIT (see `LICENSE`). FacetGlass includes the OpenFX SDK (BSD-3-Clause); the test
+host downloads expat (MIT) at build time. See `NOTICE`.

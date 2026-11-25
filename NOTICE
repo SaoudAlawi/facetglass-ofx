@@ -1,3 +1,6 @@
 FacetGlass includes the OpenFX SDK (third_party/openfx),
 Copyright OpenFX and contributors to the OpenFX project, BSD-3-Clause.
 See third_party/openfx/LICENSE.md and third_party/openfx/Support/LICENSE.
+
+The OpenFX test host (tests/ofxhost) downloads expat 2.6.4 at build time,
+Copyright Expat maintainers, MIT License. It is not part of the plugin.
