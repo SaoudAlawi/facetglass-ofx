@@ -52,9 +52,11 @@ int main(int argc, char** argv)
     double time = 0;
     bool useCache = false;
     int recMul = 1;
+    bool useSoft = false;
     std::string cacheFrom;
     for (int a = 5; a < argc; ++a) {
         if (std::strcmp(argv[a], "cache=1") == 0) { useCache = true; continue; }
+        if (std::strcmp(argv[a], "soft=1") == 0) { useSoft = true; continue; }
         if (std::strncmp(argv[a], "cacheFrom=", 10) == 0) { cacheFrom = argv[a] + 10; useCache = true; continue; }
         if (std::strncmp(argv[a], "recordSamples=", 14) == 0) { recMul = std::atoi(argv[a] + 14); continue; }
         if (!applyArg(ui, time, argv[a])) std::fprintf(stderr, "unknown argument %s\n", argv[a]);
@@ -96,7 +98,7 @@ int main(int argc, char** argv)
         t1 = tr;
         renderCPU(p, pyr.data(), pyr.data(), scene, 0, W, 0, H, ParallelRows{}, rows, kCacheReplay, cache.data());
     } else {
-        renderCPU(p, pyr.data(), pyr.data(), scene, 0, W, 0, H, ParallelRows{}, rows);
+        renderCPU(p, pyr.data(), pyr.data(), scene, 0, W, 0, H, ParallelRows{}, rows, kCacheNone, nullptr, useSoft);
     }
     auto t2 = std::chrono::steady_clock::now();
 

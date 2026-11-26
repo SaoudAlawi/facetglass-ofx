@@ -93,7 +93,8 @@ def ref_args(ui, samples, lights=(), time=0.0):
 
 
 def ofx_args(ui, samples=None, quality=None, lights=()):
-    a = [f"{MAP[k][1]}={fmt(v)}" for k, v in ui.items()]
+    # Speed-ups that change the image are off unless a check turns them on.
+    a = ["softAreas=0"] + [f"{MAP[k][1]}={fmt(v)}" for k, v in ui.items()]
     if quality is None:
         a += ["quality=3", f"minSamples={samples[0]}", f"maxSamples={samples[1]}", f"noiseThreshold={samples[2]}"]
     else:
@@ -201,6 +202,14 @@ for name, reps in (("halo", 2), ("halo", 3), ("echo_denoised", 3), ("gem_tiles",
     out, info = run_host(f"cache_{name}_{reps}", inp, W, H, ofx_args(ui, S) + ["playbackCache=2"],
                          extra_ofx + ["--repeat", str(reps)] + (["--tiles", "1"] if name != "gem_tiles" else []))
     report(f"playback cache {name} x{reps}", out, ref, info)
+# Soft areas: the plugin's half-resolution fill == the renderer's soft=1 (plain, denoised, tiles).
+for name, extra in (("soft_rain", []), ("soft_rain_denoised", []), ("soft_rain_tiles", ["--tiles", "3"])):
+    ui = dict(BASE)
+    if "denoised" in name:
+        ui["denoise"] = 0.5
+    ref = run_ref(name, inp, W, H, ref_args(ui, S) + ["look=14", "soft=1"])
+    out, info = run_host(name, inp, W, H, ofx_args(ui, S) + ["softAreas=2", "playbackCache=0"], ["--look", "14"] + extra)
+    report(f"soft areas {name}", out, ref, info)
 # Preview Quality: interactive renders use Draft, final renders keep Final.
 ui = dict(BASE, **LOOKS["faceted_plate"])
 ref = run_ref("preview_draft", inp, W, H, ref_args(ui, QUALITY[0]))

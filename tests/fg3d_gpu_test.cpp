@@ -223,6 +223,54 @@ int main(int argc, char** argv)
             std::printf("%s cache look %d: record max %.2e replay max %.2e\n", ok ? "ok  " : "FAIL", look, dRec, dRep);
         }
     }
+    // Soft areas: CUDA must match a CPU render in the same windows exactly.
+    {
+        const int softLooks[] = { 2, 6, 8, 9 };
+        for (int look : softLooks) {
+            UIParams ui;
+            double time = 0;
+            for (int k = 0; k < 8 && kLooks[look][k]; ++k) applyArg(ui, time, kLooks[look][k]);
+            ui.shape.worldScale = (float)objectScale(ui);
+            ui.shape.depth = (float)ui.depth;
+            SceneBuffers scene;
+            buildScene(makeShape(ui.shape), (float)ui.bevelAngle, scene);
+            FG3DParams p;
+            makeParams(ui, 0, 0, (float)W, (float)H, time, scene, p);
+            std::vector<float> pyr, cpu(img.size()), gpu(img.size());
+            int lv = 0;
+            buildPyramidCPU(img.data(), 0, 0, W, H, W * 4, 0, 0, W, H, ui.colorSpace, pyr, lv);
+            FG3DParams pc = p;
+            pc.srcW = pc.glsW = W; pc.srcH = pc.glsH = H; pc.srcLevels = pc.glsLevels = lv; pc.useSource = 0;
+            auto par = [](int b, int e, auto fn) {
+                const unsigned nt = std::max(1u, std::thread::hardware_concurrency());
+                std::vector<std::thread> pool;
+                for (unsigned t = 0; t < nt; ++t)
+                    pool.emplace_back([&, t] { for (int i = b + (int)t; i < e; i += (int)nt) fn(i); });
+                for (auto& th : pool) th.join();
+            };
+            check(cudaMemcpy(dSrc, img.data(), img.size() * 4, cudaMemcpyHostToDevice), "upload");
+            CudaFrame fr;
+            fr.src.data = dSrc; fr.src.w = W; fr.src.h = H; fr.src.stride = W * 4;
+            fr.frameW = W; fr.frameH = H;
+            fr.dst = dDst; fr.dstStride = W * 4;
+            fr.soft = true;
+            for (int ty = 0; ty < 2; ++ty)
+                for (int tx = 0; tx < 2; ++tx) {
+                    const int wx0 = W * tx / 2, wx1 = W * (tx + 1) / 2, wy0 = H * ty / 2, wy1 = H * (ty + 1) / 2;
+                    renderCPU(pc, pyr.data(), pyr.data(), scene, wx0, wx1, wy0, wy1, par,
+                              [&](int y) { return &cpu[(size_t)y * W * 4 + (size_t)wx0 * 4]; }, kCacheNone, nullptr, true);
+                    fr.winX1 = wx0; fr.winX2 = wx1; fr.winY1 = wy0; fr.winY2 = wy1;
+                    if (const char* err = renderCUDA(fr, p, scene)) { std::fprintf(stderr, "renderCUDA: %s\n", err); return 3; }
+                }
+            check(cudaDeviceSynchronize(), "sync");
+            check(cudaMemcpy(gpu.data(), dDst, gpu.size() * 4, cudaMemcpyDeviceToHost), "download");
+            double d = 0;
+            for (size_t i = 0; i < img.size(); ++i) d = std::max(d, (double)std::fabs(cpu[i] - gpu[i]));
+            const bool ok = d <= 1e-5;
+            allOk = allOk && ok;
+            std::printf("%s soft look %d: max %.2e\n", ok ? "ok  " : "FAIL", look, d);
+        }
+    }
     cudaFree(dSrc); cudaFree(dDst); cudaFree(dGls);
     std::printf("%s\n", allOk ? "PASS" : "FAIL");
     return allOk ? 0 : 1;

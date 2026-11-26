@@ -36,28 +36,57 @@ __global__ void mipKernel(const float* prev, int lw, int lh, float* next, int nw
     o[0] = c.x; o[1] = c.y; o[2] = c.z; o[3] = c.w;
 }
 
+// Soft areas: half-resolution block and frame origin (soft = 0: unused).
+struct SoftArgs {
+    const float* half;
+    int hx0, hy0, hw, hh, soft, fx0, fy0;
+};
+
+__global__ void halfKernel(FG3DParams ph, const float* srcPyr, const float* glsPyr, const float* tris,
+                           const float* nodesF, const int* nodesI, SoftArgs sa, float* half)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i >= sa.hw || j >= sa.hh) return;
+    FG3DParams pp = ph;
+    fg3d_trace(&pp, srcPyr, glsPyr, tris, nodesF, nodesI, sa.hx0 + i, sa.hy0 + j,
+               half + ((long long)j * sa.hw + i) * FG_AUX_FLOATS);
+}
+
 __global__ void shadeKernel(FG3DParams p, const float* srcPyr, const float* glsPyr, const float* tris,
                             const float* nodesF, const int* nodesI, float* dst, int dstX1, int dstY1, int dstStride,
-                            int x0, int y0, int x1, int y1)
+                            int x0, int y0, int x1, int y1, SoftArgs sa)
 {
     const int x = x0 + blockIdx.x * blockDim.x + threadIdx.x;
     const int y = y0 + blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= x1 || y >= y1) return;
     FG3DParams pp = p;
-    fgv4 c = fg3d_shade(&pp, srcPyr, glsPyr, tris, nodesF, nodesI, x, y);
+    fgv4 c;
+    float t[FG_AUX_FLOATS];
+    if (sa.soft && fg3d_soft_up(sa.half, sa.hw, sa.hh, sa.hx0, sa.hy0, x - sa.fx0, y - sa.fy0, FG_SOFT_SPREAD, t))
+        c = fg3d_finish(&pp, srcPyr, x, y, fgv4m(t[0], t[1], t[2], t[3]));
+    else
+        c = fg3d_shade(&pp, srcPyr, glsPyr, tris, nodesF, nodesI, x, y);
     float* o = dst + (long long)(y - dstY1) * dstStride + (long long)(x - dstX1) * 4;
     o[0] = c.x; o[1] = c.y; o[2] = c.z; o[3] = c.w;
 }
 
 __global__ void traceKernel(FG3DParams p, const float* srcPyr, const float* glsPyr, const float* tris,
-                            const float* nodesF, const int* nodesI, float* aux, float* cv, int rx0, int ry0, int w, int h)
+                            const float* nodesF, const int* nodesI, float* aux, float* cv, int rx0, int ry0, int w, int h,
+                            SoftArgs sa)
 {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int j = blockIdx.y * blockDim.y + threadIdx.y;
     if (i >= w || j >= h) return;
     FG3DParams pp = p;
     float* a = aux + ((long long)j * w + i) * FG_AUX_FLOATS;
-    fg3d_trace(&pp, srcPyr, glsPyr, tris, nodesF, nodesI, rx0 + i, ry0 + j, a);
+    float t[FG_AUX_FLOATS];
+    if (sa.soft && fg3d_soft_up(sa.half, sa.hw, sa.hh, sa.hx0, sa.hy0, rx0 + i - sa.fx0, ry0 + j - sa.fy0,
+                                FG_SOFT_SPREAD, t)) {
+        for (int k = 0; k < FG_AUX_FLOATS; ++k) a[k] = t[k];
+    } else {
+        fg3d_trace(&pp, srcPyr, glsPyr, tris, nodesF, nodesI, rx0 + i, ry0 + j, a);
+    }
     float* c = cv + ((long long)j * w + i) * FG_CV_FLOATS;
     for (int k = 0; k < FG_CV_FLOATS; ++k) c[k] = a[k];
 }
@@ -201,6 +230,23 @@ const char* renderCUDA(const CudaFrame& f, FG3DParams p, const SceneBuffers& sce
 
     const int ww = f.winX2 - f.winX1, wh = f.winY2 - f.winY1;
     const int cmode = f.cache ? f.cacheMode : fg3d::kCacheNone;
+    // Soft areas: half-resolution pre-pass over the traced region.
+    SoftArgs sa = {};
+    float* halfBuf = nullptr;
+    if (f.soft && cmode == fg3d::kCacheNone) {
+        const fg3d::CacheRegion reg = fg3d::cacheRegion(p, f.winX1, f.winX2, f.winY1, f.winY2);
+        const fg3d::SoftRegion sr = fg3d::softRegion(p, reg.x0, reg.y0, reg.w, reg.h);
+        if (sr.hw > 1 && sr.hh > 1 &&
+            cudaMallocAsync(reinterpret_cast<void**>(&halfBuf), (size_t)sr.hw * sr.hh * FG_AUX_FLOATS * 4, st) == cudaSuccess) {
+            sa.half = halfBuf; sa.hx0 = sr.hx0; sa.hy0 = sr.hy0; sa.hw = sr.hw; sa.hh = sr.hh; sa.soft = 1;
+            sa.fx0 = (int)p.frameX; sa.fy0 = (int)p.frameY;
+            const dim3 b(16, 8);
+            halfKernel<<<grid2d(sr.hw, sr.hh, b), b, 0, st>>>(fg3d::softHalfParams(p), srcPyr, glsPyr, tris, nodesF,
+                                                              nodesI, sa, halfBuf);
+        } else {
+            halfBuf = nullptr;
+        }
+    }
     if (cmode != fg3d::kCacheNone && !dn && ww > 0 && wh > 0) {
         // Region = window. Recording also outputs the replay (no change in look after frame 2).
         const dim3 b(16, 8);
@@ -230,7 +276,7 @@ const char* renderCUDA(const CudaFrame& f, FG3DParams p, const SceneBuffers& sce
         float* cur = reinterpret_cast<float*>(mem + oCvA);
         float* nxt = reinterpret_cast<float*>(mem + oCvB);
         const dim3 b(16, 8);
-        traceKernel<<<grid2d(rw, rh, b), b, 0, st>>>(p, srcPyr, glsPyr, tris, nodesF, nodesI, aux, cur, rx0, ry0, rw, rh);
+        traceKernel<<<grid2d(rw, rh, b), b, 0, st>>>(p, srcPyr, glsPyr, tris, nodesF, nodesI, aux, cur, rx0, ry0, rw, rh, sa);
         for (int it = 0; it < FG_DENOISE_ITERS; ++it) {
             atrousKernel<<<grid2d(rw, rh, b), b, 0, st>>>(aux, cur, nxt, rw, rh, 1 << it, p.denoise, p.frameH);
             std::swap(cur, nxt);
@@ -240,9 +286,10 @@ const char* renderCUDA(const CudaFrame& f, FG3DParams p, const SceneBuffers& sce
     } else if (ww > 0 && wh > 0) {
         const dim3 b(16, 8);
         shadeKernel<<<grid2d(ww, wh, b), b, 0, st>>>(p, srcPyr, glsPyr, tris, nodesF, nodesI, f.dst, f.dstX1, f.dstY1,
-                                                     f.dstStride, f.winX1, f.winY1, f.winX2, f.winY2);
+                                                     f.dstStride, f.winX1, f.winY1, f.winX2, f.winY2, sa);
     }
     e = cudaGetLastError();
+    if (halfBuf) cudaFreeAsync(halfBuf, st);
     cudaFreeAsync(mem, st);
     if (e != cudaSuccess) {
         std::snprintf(err, sizeof err, "kernel launch: %s", cudaGetErrorString(e));

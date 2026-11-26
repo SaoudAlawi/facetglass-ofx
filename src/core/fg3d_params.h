@@ -50,6 +50,9 @@
    weight R, G, B, A);
    flags: 1 = refract source, 2 = highlight boost. FG_SLOT_ACC: accumulators
    while recording. */
+/* Soft areas: half-resolution pixels whose rays land spread over at least this
+   many half pixels (= 2x full pixels) may be interpolated. */
+#define FG_SOFT_SPREAD 1.5f
 #define FG_CACHE_SLOTS 6
 #define FG_CACHE_REACH 2.0f   /* base merge radius, pixels */
 #define FG_SLOT_FLOATS 9
@@ -59,9 +62,12 @@
 /* Denoiser buffers (per pixel of the padded render region, tightly packed).
  * Aux: 0..3 linear RGBA, 4 luminance variance of the pixel mean, 5 glass
  * coverage, 6..8 mean first-hit normal, 9..10 mean landing position, 11 landing
- * spread in pixels.
+ * spread in pixels, 12 blur spread for soft areas: the landing spread of the rays
+ * that took the same path through the glass as the first one (so separate sharp
+ * copies are not mistaken for blur), or the full spread when no path holds a
+ * quarter of the rays (a diffuse mix of many paths).
  * CV (colour + variance, ping-ponged between iterations): RGBA, variance. */
-#define FG_AUX_FLOATS 12
+#define FG_AUX_FLOATS 13
 #define FG_CV_FLOATS 5
 #define FG_DENOISE_ITERS 4
 #define FG_DENOISE_PAD 30   /* 2 * (1 + 2 + 4 + 8): reach of 4 a-trous passes */

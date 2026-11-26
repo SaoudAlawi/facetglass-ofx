@@ -21,6 +21,10 @@ typedef struct FGWinArgs {
     int step;
     float sigma, frameH;
     int pad;
+    // Soft areas: half-resolution block (hx0, hy0, hw, hh); soft != 0 to use it;
+    // (fx0, fy0) = frame origin in pixels.
+    int hx0, hy0, hw, hh;
+    int soft, fx0, fy0, pad2;
 } FGWinArgs;
 
 kernel void fg_decode(device const float* src [[buffer(0)]], device float* lvl0 [[buffer(1)]],
@@ -50,11 +54,16 @@ kernel void fg_shade(constant FG3DParams& p [[buffer(0)]], device const float* s
                      device const float* glsPyr [[buffer(2)]], device const float* tris [[buffer(3)]],
                      device const float* nodesF [[buffer(4)]], device const int* nodesI [[buffer(5)]],
                      device float* dst [[buffer(6)]], constant FGWinArgs& a [[buffer(7)]],
-                     uint2 gid [[thread_position_in_grid]])
+                     device const float* halfRes [[buffer(8)]], uint2 gid [[thread_position_in_grid]])
 {
     const int x = a.x0 + (int)gid.x, y = a.y0 + (int)gid.y;
     if (x >= a.x1 || y >= a.y1) return;
-    fgv4 c = fg3d_shade(&p, srcPyr, glsPyr, tris, nodesF, nodesI, x, y);
+    fgv4 c;
+    float t[FG_AUX_FLOATS];
+    if (a.soft != 0 && fg3d_soft_up(halfRes, a.hw, a.hh, a.hx0, a.hy0, x - a.fx0, y - a.fy0, FG_SOFT_SPREAD, t))
+        c = fg3d_finish(&p, srcPyr, x, y, fgv4m(t[0], t[1], t[2], t[3]));
+    else
+        c = fg3d_shade(&p, srcPyr, glsPyr, tris, nodesF, nodesI, x, y);
     device float* o = dst + a.dstBase + (y - a.dstY1) * a.dstStride + (x - a.dstX1) * 4;
     o[0] = c.x; o[1] = c.y; o[2] = c.z; o[3] = c.w;
 }
@@ -63,12 +72,19 @@ kernel void fg_trace(constant FG3DParams& p [[buffer(0)]], device const float* s
                      device const float* glsPyr [[buffer(2)]], device const float* tris [[buffer(3)]],
                      device const float* nodesF [[buffer(4)]], device const int* nodesI [[buffer(5)]],
                      device float* aux [[buffer(6)]], device float* cv [[buffer(7)]],
-                     constant FGWinArgs& a [[buffer(8)]], uint2 gid [[thread_position_in_grid]])
+                     constant FGWinArgs& a [[buffer(8)]], device const float* halfRes [[buffer(9)]],
+                     uint2 gid [[thread_position_in_grid]])
 {
     const int i = (int)gid.x, j = (int)gid.y;
     if (i >= a.rw || j >= a.rh) return;
     device float* ax = aux + (j * a.rw + i) * FG_AUX_FLOATS;
-    fg3d_trace(&p, srcPyr, glsPyr, tris, nodesF, nodesI, a.rx0 + i, a.ry0 + j, ax);
+    float t[FG_AUX_FLOATS];
+    if (a.soft != 0 && fg3d_soft_up(halfRes, a.hw, a.hh, a.hx0, a.hy0, a.rx0 + i - a.fx0, a.ry0 + j - a.fy0,
+                                    FG_SOFT_SPREAD, t)) {
+        for (int k = 0; k < FG_AUX_FLOATS; ++k) ax[k] = t[k];
+    } else {
+        fg3d_trace(&p, srcPyr, glsPyr, tris, nodesF, nodesI, a.rx0 + i, a.ry0 + j, ax);
+    }
     device float* c = cv + (j * a.rw + i) * FG_CV_FLOATS;
     for (int k = 0; k < FG_CV_FLOATS; ++k) c[k] = ax[k];
 }
@@ -132,4 +148,16 @@ kernel void fg_replay_cv(constant FG3DParams& p [[buffer(0)]], device const floa
     fgv4 c = fg3d_replay(&p, srcPyr, glsPyr, cache + (j * a.rw + i) * FG_CACHE_FLOATS);
     device float* o = cv + (j * a.rw + i) * FG_CV_FLOATS;
     o[0] = c.x; o[1] = c.y; o[2] = c.z; o[3] = c.w; o[4] = aux[(j * a.rw + i) * FG_AUX_FLOATS + 4];
+}
+
+// Soft areas: the half-resolution pre-pass (p = half-size frame at origin 0).
+kernel void fg_trace_half(constant FG3DParams& p [[buffer(0)]], device const float* srcPyr [[buffer(1)]],
+                          device const float* glsPyr [[buffer(2)]], device const float* tris [[buffer(3)]],
+                          device const float* nodesF [[buffer(4)]], device const int* nodesI [[buffer(5)]],
+                          device float* halfRes [[buffer(6)]], constant FGWinArgs& a [[buffer(7)]],
+                          uint2 gid [[thread_position_in_grid]])
+{
+    const int i = (int)gid.x, j = (int)gid.y;
+    if (i >= a.hw || j >= a.hh) return;
+    fg3d_trace(&p, srcPyr, glsPyr, tris, nodesF, nodesI, a.hx0 + i, a.hy0 + j, halfRes + (j * a.hw + i) * FG_AUX_FLOATS);
 }

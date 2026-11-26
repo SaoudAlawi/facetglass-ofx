@@ -28,10 +28,12 @@ struct FGWinArgs {
     int step;
     float sigma, frameH;
     int pad;
+    int hx0, hy0, hw, hh;
+    int soft, fx0, fy0, pad2;
 };
 
 struct Pipelines {
-    id<MTLComputePipelineState> decode, mip, shade, trace, atrous, finish, rec, replayOut, replayCv;
+    id<MTLComputePipelineState> decode, mip, shade, trace, atrous, finish, rec, replayOut, replayCv, half;
 };
 
 // Compiled once per device (the source compiles in a fraction of a second).
@@ -80,8 +82,9 @@ const Pipelines* pipelinesFor(id<MTLDevice> dev, const char** err)
     p->rec = make("fg_trace_rec");
     p->replayOut = make("fg_replay_out");
     p->replayCv = make("fg_replay_cv");
+    p->half = make("fg_trace_half");
     if (!p->decode || !p->mip || !p->shade || !p->trace || !p->atrous || !p->finish || !p->rec || !p->replayOut ||
-        !p->replayCv) {
+        !p->replayCv || !p->half) {
         delete p;
         *err = msg;
         return nullptr;
@@ -202,6 +205,32 @@ const char* renderMetal(const MetalFrame& f, FG3DParams p, const SceneBuffers& s
         };
         id<MTLBuffer> cacheBuf = (__bridge id<MTLBuffer>)f.cache;
         const int cmode = cacheBuf ? f.cacheMode : kCacheNone;
+        // Soft areas: half-resolution pre-pass over the traced region.
+        id<MTLBuffer> half = srcPyr;  // placeholder binding when unused
+        if (f.soft && cmode == kCacheNone) {
+            const CacheRegion reg = cacheRegion(p, f.winX1, f.winX2, f.winY1, f.winY2);
+            const SoftRegion sr = softRegion(p, reg.x0, reg.y0, reg.w, reg.h);
+            if (sr.hw > 1 && sr.hh > 1) {
+                id<MTLBuffer> hb = [dev newBufferWithLength:(size_t)sr.hw * sr.hh * FG_AUX_FLOATS * 4
+                                                    options:MTLResourceStorageModePrivate];
+                if (hb) {
+                    half = hb;
+                    a.soft = 1; a.hx0 = sr.hx0; a.hy0 = sr.hy0; a.hw = sr.hw; a.hh = sr.hh;
+                    a.fx0 = (int)p.frameX; a.fy0 = (int)p.frameY;
+                    FG3DParams ph = softHalfParams(p);
+                    [enc setBytes:&ph length:sizeof ph atIndex:0];
+                    [enc setBuffer:srcPyr offset:0 atIndex:1];
+                    [enc setBuffer:glsPyr offset:0 atIndex:2];
+                    [enc setBuffer:tris offset:0 atIndex:3];
+                    [enc setBuffer:nodesF offset:0 atIndex:4];
+                    [enc setBuffer:nodesI offset:0 atIndex:5];
+                    [enc setBuffer:half offset:0 atIndex:6];
+                    [enc setBytes:&a length:sizeof a atIndex:7];
+                    dispatch2d(enc, ps->half, sr.hw, sr.hh);
+                    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+                }
+            }
+        }
         if (cmode != kCacheNone && !dn) {
             // Region = window. Recording also outputs the replay (no change in look after frame 2).
             a.rx0 = f.winX1; a.ry0 = f.winY1; a.rw = ww; a.rh = wh; a.pad = 0;
@@ -268,6 +297,7 @@ const char* renderMetal(const MetalFrame& f, FG3DParams p, const SceneBuffers& s
             [enc setBuffer:aux offset:0 atIndex:6];
             [enc setBuffer:cur offset:0 atIndex:7];
             [enc setBytes:&a length:sizeof a atIndex:8];
+            [enc setBuffer:half offset:0 atIndex:9];
             dispatch2d(enc, ps->trace, rw, rh);
             for (int it = 0; it < FG_DENOISE_ITERS; ++it) {
                 a.step = 1 << it;
@@ -290,6 +320,7 @@ const char* renderMetal(const MetalFrame& f, FG3DParams p, const SceneBuffers& s
             bindScene();
             [enc setBuffer:dst offset:0 atIndex:6];
             [enc setBytes:&a length:sizeof a atIndex:7];
+            [enc setBuffer:half offset:0 atIndex:8];
             dispatch2d(enc, ps->shade, ww, wh);
         }
         [enc endEncoding];

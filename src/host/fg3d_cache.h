@@ -82,3 +82,34 @@ struct CacheState {
 };
 
 }  // namespace fg3d
+
+namespace fg3d {
+
+// Soft areas (see fg3d_soft_up in fg3d_core.h): the half-resolution pre-pass.
+struct SoftRegion {
+    int hx0 = 0, hy0 = 0, hw = 0, hh = 0;  // half pixels, frame-relative
+};
+
+// Parameters of the half-resolution frame (origin 0, half size).
+inline FG3DParams softHalfParams(const FG3DParams& p)
+{
+    FG3DParams h = p;
+    h.frameX = 0.0f; h.frameY = 0.0f;
+    h.frameW = p.frameW * 0.5f; h.frameH = p.frameH * 0.5f;
+    return h;
+}
+
+// Half pixels covering full-resolution region (x0, y0, w, h), with a margin of one.
+inline SoftRegion softRegion(const FG3DParams& p, int x0, int y0, int w, int h)
+{
+    SoftRegion r;
+    const int fx0 = x0 - (int)p.frameX, fy0 = y0 - (int)p.frameY;
+    const int maxW = ((int)p.frameW + 1) / 2, maxH = ((int)p.frameH + 1) / 2;
+    r.hx0 = std::max(0, fx0 / 2 - 1);
+    r.hy0 = std::max(0, fy0 / 2 - 1);
+    r.hw = std::max(0, std::min(maxW, (fx0 + w) / 2 + 2) - r.hx0);
+    r.hh = std::max(0, std::min(maxH, (fy0 + h) / 2 + 2) - r.hy0);
+    return r;
+}
+
+}  // namespace fg3d

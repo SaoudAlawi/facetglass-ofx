@@ -242,6 +242,66 @@ int main(int argc, char** argv)
                             ok ? "ok  " : "FAIL", look, dRec, dRep, cpuMs, gpuMs);
             }
         }
+        // Soft areas: CPU and Metal must match exactly (plain and denoised).
+        if (!bench) {
+            const int softLooks[] = { 2, 6, 8, 9 };
+            for (int look : softLooks) {
+                UIParams ui;
+                double time = 0;
+                for (int k = 0; k < 8 && kLooks[look][k]; ++k) applyArg(ui, time, kLooks[look][k]);
+                ui.shape.worldScale = (float)objectScale(ui);
+                ui.shape.depth = (float)ui.depth;
+                SceneBuffers scene;
+                buildScene(makeShape(ui.shape), (float)ui.bevelAngle, scene);
+                FG3DParams p;
+                makeParams(ui, 0, 0, (float)W, (float)H, time, scene, p);
+                std::vector<float> pyr, cpu(n);
+                int lv = 0;
+                buildPyramidCPU(img.data(), 0, 0, W, H, W * 4, 0, 0, W, H, ui.colorSpace, pyr, lv);
+                FG3DParams pc = p;
+                pc.srcW = pc.glsW = W; pc.srcH = pc.glsH = H; pc.srcLevels = pc.glsLevels = lv; pc.useSource = 0;
+                auto par = [](int b, int e, auto fn) {
+                    const unsigned nt = std::max(1u, std::thread::hardware_concurrency());
+                    std::vector<std::thread> pool;
+                    for (unsigned t = 0; t < nt; ++t)
+                        pool.emplace_back([&, t] { for (int i = b + (int)t; i < e; i += (int)nt) fn(i); });
+                    for (auto& th : pool) th.join();
+                };
+                renderCPU(pc, pyr.data(), pyr.data(), scene, 0, W, 0, H, par, [&](int y) { return &cpu[(size_t)y * W * 4]; },
+                          kCacheNone, nullptr, true);
+                MetalFrame fr;
+                fr.queue = (__bridge void*)queue;
+                fr.src.buffer = (__bridge void*)bSrc; fr.src.base = kPad;
+                fr.src.w = W; fr.src.h = H; fr.src.stride = W * 4;
+                fr.frameW = W; fr.frameH = H;
+                fr.dst = (__bridge void*)bDst; fr.dstBase = kPad; fr.dstStride = W * 4;
+                fr.wait = true; fr.soft = true;
+                std::memcpy((float*)bSrc.contents + kPad, img.data(), n * 4);
+                // In 2x2 windows, like the main test.
+                for (int ty = 0; ty < 2; ++ty)
+                    for (int tx = 0; tx < 2; ++tx) {
+                        fr.winX1 = W * tx / 2; fr.winX2 = W * (tx + 1) / 2;
+                        fr.winY1 = H * ty / 2; fr.winY2 = H * (ty + 1) / 2;
+                        if (const char* err = renderMetal(fr, p, scene)) { std::fprintf(stderr, "renderMetal: %s\n", err); return 3; }
+                    }
+                const float* g = (const float*)bDst.contents + kPad;
+                double d = 0;
+                for (size_t i = 0; i < n; ++i) d = std::max(d, (double)std::fabs(cpu[i] - g[i]));
+                // Tiles trace their own half-resolution pass, so compare against a CPU render in the same windows.
+                std::vector<float> cpuT(n);
+                for (int ty = 0; ty < 2; ++ty)
+                    for (int tx = 0; tx < 2; ++tx)
+                        renderCPU(pc, pyr.data(), pyr.data(), scene, W * tx / 2, W * (tx + 1) / 2, H * ty / 2, H * (ty + 1) / 2,
+                                  par, [&](int y) { return &cpuT[(size_t)y * W * 4 + (size_t)(W * tx / 2) * 4]; },
+                                  kCacheNone, nullptr, true);
+                double dT = 0, dFull = d;
+                for (size_t i = 0; i < n; ++i) dT = std::max(dT, (double)std::fabs(cpuT[i] - g[i]));
+                const bool ok = dT <= 1e-5;
+                allOk = allOk && ok;
+                std::printf("%s soft look %d: metal vs cpu (same windows) max %.2e  (vs cpu full frame %.2e)\n",
+                            ok ? "ok  " : "FAIL", look, dT, dFull);
+            }
+        }
         std::printf("%s\n", allOk ? "PASS" : "FAIL");
         return allOk ? 0 : 1;
     }

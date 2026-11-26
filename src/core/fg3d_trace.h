@@ -14,6 +14,11 @@ FG_DEVICE fgv4 FG3D_TRACE_FN(FG_PCONST const FG3DParams* p, FG_GLOBAL const floa
   float fx = (float)x - p->frameX, fy = (float)y - p->frameY;
   float pixU = (fx + 0.5f) / W, pixV = (fy + 0.5f) / H;
   float covN = 0.0f, gnx = 0.0f, gny = 0.0f, gnz = 0.0f, luSum = 0.0f, lvSum = 0.0f, luSq = 0.0f, lvSq = 0.0f;
+  /* Same-path landing statistics: rays whose main path crossed surfaces facing
+     the same ways as the first ray's (path signature), so separate copies (from
+     different facets) are not taken for blur. */
+  unsigned int refSig = 0u;
+  float spN = 0.0f, spU = 0.0f, spV = 0.0f, spUU = 0.0f, spVV = 0.0f;
   /* Sums for the variance of the weighted (spectral) mean, per channel:
      sum w^2 c^2, sum w^2 c, sum w^2. */
   float qR2 = 0.0f, qR1 = 0.0f, qR0 = 0.0f, qG2 = 0.0f, qG1 = 0.0f, qG0 = 0.0f, qB2 = 0.0f, qB1 = 0.0f, qB0 = 0.0f;
@@ -60,7 +65,7 @@ FG_DEVICE fgv4 FG3D_TRACE_FN(FG_PCONST const FG3DParams* p, FG_GLOBAL const floa
       if (aux != 0) {
         aux[0] = c0.x; aux[1] = c0.y; aux[2] = c0.z; aux[3] = c0.w;
         aux[4] = 0.0f; aux[5] = 0.0f; aux[6] = 0.0f; aux[7] = 0.0f; aux[8] = 0.0f;
-        aux[9] = pixU; aux[10] = pixV; aux[11] = 0.0f;
+        aux[9] = pixU; aux[10] = pixV; aux[11] = 0.0f; aux[12] = 0.0f;
       }
 #if FG3D_TRACE_CACHE
       fg3d_cache_passthrough(cache, pixU, pixV);
@@ -115,6 +120,7 @@ FG_DEVICE fgv4 FG3D_TRACE_FN(FG_PCONST const FG3DParams* p, FG_GLOBAL const floa
     }
 
     unsigned int rs = fg3d_hash(pix + (unsigned int)i * 2654435761u);
+    unsigned int sig = 0u;
 
     /* Camera ray through the focus plane. */
     fgv3 o = fgv(ax, ay, 0.0f);
@@ -146,6 +152,7 @@ FG_DEVICE fgv4 FG3D_TRACE_FN(FG_PCONST const FG3DParams* p, FG_GLOBAL const floa
         float th = 0.0f, uh = 0.0f, vh = 0.0f;
         int k = fg3d_intersect(tris, nodesF, nodesI, p->numNodes, ro, rd, eps, &th, &uh, &vh);
         if (k < 0) break;
+
         FG_GLOBAL const float* tr = tris + k * FG_TRI_FLOATS;
         fgv3 hitO = fgv_madd(ro, rd, th);
         if (inside != 0 && p->absorbOn != 0) {
@@ -155,6 +162,13 @@ FG_DEVICE fgv4 FG3D_TRACE_FN(FG_PCONST const FG3DParams* p, FG_GLOBAL const floa
           tB *= fg3d_exp(-p->absorb[2] * th);
         }
         fgv3 ng = fgv_load(tr + 18);
+        if (isMain != 0) {
+          /* Path signature: surface directions crossed, rounded to about 7 degrees. */
+          unsigned int qn = (unsigned int)(int)FG_FLOOR(ng.x * 8.0f + 8.5f) * 289u +
+                            (unsigned int)(int)FG_FLOOR(ng.y * 8.0f + 8.5f) * 17u +
+                            (unsigned int)(int)FG_FLOOR(ng.z * 8.0f + 8.5f);
+          sig = sig * 0x9E3779B1u + qn + 1u;
+        }
         fgv3 ns = fg3d_shading_normal(tr, uh, vh, p->bevelWidth / s);
         if (b == 0 && isMain != 0) {
           fgv3 nw = fg3d_rot(p, ns);
@@ -257,6 +271,8 @@ FG_DEVICE fgv4 FG3D_TRACE_FN(FG_PCONST const FG3DParams* p, FG_GLOBAL const floa
           float tl = (1.0f - o.z) / d.z;
           float lu = (o.x + d.x * tl) / aspect + 0.5f, lv = o.y + d.y * tl + 0.5f;
           luSum += lu; lvSum += lv; luSq += lu * lu; lvSq += lv * lv;
+          if (i == 0) refSig = sig;
+          if (sig == refSig) { spN += 1.0f; spU += lu; spV += lv; spUU += lu * lu; spVV += lv * lv; }
         } else {
           luSum -= 1.0f; lvSum -= 1.0f; luSq += 1.0f; lvSq += 1.0f;
         }
@@ -336,6 +352,15 @@ FG_DEVICE fgv4 FG3D_TRACE_FN(FG_PCONST const FG3DParams* p, FG_GLOBAL const floa
        pixel see sharp detail (their variation is anti-aliasing, not grain). */
     float vu = FG_FMAX(0.0f, luSq / fn - aux[9] * aux[9]), vv = FG_FMAX(0.0f, lvSq / fn - aux[10] * aux[10]);
     aux[11] = FG_SQRT(vu * W * W + vv * H * H);
+    if (spN < 0.25f * fn) {
+      aux[12] = aux[11];  /* no dominant path: a diffuse mix of many paths, i.e. blur */
+    } else if (spN > 1.5f) {
+      float mu = spU / spN, mv = spV / spN;
+      float su = FG_FMAX(0.0f, spUU / spN - mu * mu), sv = FG_FMAX(0.0f, spVV / spN - mv * mv);
+      aux[12] = FG_SQRT(su * W * W + sv * H * H);
+    } else {
+      aux[12] = 0.0f;
+    }
   }
 #if FG3D_TRACE_CACHE
   fg3d_cache_write(cache, cs, ncs, cL, wR, wG, wB, (float)(n > 0 ? n : 1), W, H);

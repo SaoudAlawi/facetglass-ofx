@@ -657,6 +657,38 @@ FG_DEVICE fgv4 fg3d_replay(FG_PCONST const FG3DParams* p, FG_GLOBAL const float*
 #undef FG3D_TRACE_CACHE
 #undef FG3D_TRACE_EXTRA
 
+/* ------------------------------------------------------------------ soft areas
+   Speed-up for soft regions: the region is first traced at half resolution
+   (fg3d_trace with a half-size frame at origin 0, so half pixel i covers full
+   frame-relative pixels 2i and 2i + 1). A full-resolution pixel whose four
+   surrounding half-res pixels are all soft (same-path landing spread, aux[12],
+   >= minSpread half pixels) and agree on glass coverage takes their bilinear interpolation of
+   colour and denoiser guides instead of being traced. `ha` holds FG_AUX_FLOATS
+   per half pixel of the hw x hh block starting at half pixel (hx0, hy0);
+   (fx, fy) are frame-relative full pixel indices. Returns 1 and fills `out`. */
+FG_DEVICE int fg3d_soft_up(FG_GLOBAL const float* ha, int hw, int hh, int hx0, int hy0, int fx, int fy,
+                           float minSpread, FG_PRIV float* out)
+{
+  float gx = ((float)fx + 0.5f) * 0.5f - 0.5f - (float)hx0;
+  float gy = ((float)fy + 0.5f) * 0.5f - 0.5f - (float)hy0;
+  float x0f = FG_FLOOR(gx), y0f = FG_FLOOR(gy);
+  float tx = gx - x0f, ty = gy - y0f;
+  int x0 = (int)x0f, y0 = (int)y0f;
+  if (x0 < 0 || y0 < 0 || x0 + 1 >= hw || y0 + 1 >= hh) return 0;
+  FG_GLOBAL const float* a00 = ha + (y0 * hw + x0) * FG_AUX_FLOATS;
+  FG_GLOBAL const float* a10 = a00 + FG_AUX_FLOATS;
+  FG_GLOBAL const float* a01 = a00 + hw * FG_AUX_FLOATS;
+  FG_GLOBAL const float* a11 = a01 + FG_AUX_FLOATS;
+  if (a00[12] < minSpread || a10[12] < minSpread || a01[12] < minSpread || a11[12] < minSpread) return 0;
+  float cmin = FG_FMIN(FG_FMIN(a00[5], a10[5]), FG_FMIN(a01[5], a11[5]));
+  float cmax = FG_FMAX(FG_FMAX(a00[5], a10[5]), FG_FMAX(a01[5], a11[5]));
+  if (cmax - cmin > 0.01f) return 0;
+  float w00 = (1.0f - tx) * (1.0f - ty), w10 = tx * (1.0f - ty), w01 = (1.0f - tx) * ty, w11 = tx * ty;
+  for (int k = 0; k < FG_AUX_FLOATS; k++) out[k] = a00[k] * w00 + a10[k] * w10 + a01[k] * w01 + a11[k] * w11;
+  out[11] *= 2.0f; out[12] *= 2.0f;  /* spreads back in full-resolution pixels */
+  return 1;
+}
+
 /* Blends a traced (or denoised) linear colour with the original by Mix and
    encodes it back to the footage's colour space. */
 FG_DEVICE fgv4 fg3d_finish(FG_PCONST const FG3DParams* p, FG_GLOBAL const float* src, int x, int y, fgv4 c)

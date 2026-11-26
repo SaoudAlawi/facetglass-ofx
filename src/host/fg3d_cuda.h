@@ -24,6 +24,7 @@ struct CudaFrame {
     int dstX1 = 0, dstY1 = 0, dstStride = 0;
     int winX1 = 0, winY1 = 0, winX2 = 0, winY2 = 0;          // render window
     int cacheMode = 0;            // fg3d::CacheMode (fg3d_cache.h)
+    bool soft = false;            // soft areas (half-resolution pre-pass); ignored with the cache
     float* cache = nullptr;       // device memory from cudaCacheAlloc, cacheFloats(...) floats
 };
 

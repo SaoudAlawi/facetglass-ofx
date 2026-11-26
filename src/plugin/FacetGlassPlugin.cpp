@@ -108,6 +108,7 @@
 #define P_QUALITY "quality"
 #define P_PREVIEWQ "previewQuality"
 #define P_PCACHE "playbackCache"
+#define P_SOFT "softAreas"
 #define P_MINS "minSamples"
 #define P_MAXS "maxSamples"
 #define P_NOISE "noiseThreshold"
@@ -266,7 +267,7 @@ private:
 
     Clip *_dst, *_src, *_refract;
 
-    ChoiceParam *_shape, *_world, *_cspace, *_quality, *_gtype, *_previewQ, *_mount, *_look, *_pcache;
+    ChoiceParam *_shape, *_world, *_cspace, *_quality, *_gtype, *_previewQ, *_mount, *_look, *_pcache, *_soft;
     RGBParam* _tint;
     IntParam *_facets, *_detail, *_seed, *_bounces, *_minS, *_maxS;
     StringParam* _obj;
@@ -304,6 +305,7 @@ FacetGlassPlugin::FacetGlassPlugin(OfxImageEffectHandle handle) : ImageEffect(ha
     _quality = fetchChoiceParam(P_QUALITY);
     _previewQ = fetchChoiceParam(P_PREVIEWQ);
     _pcache = fetchChoiceParam(P_PCACHE);
+    _soft = fetchChoiceParam(P_SOFT);
     _facets = fetchIntParam(P_FACETS);
     _detail = fetchIntParam(P_DETAIL);
     _seed = fetchIntParam(P_SEED);
@@ -649,6 +651,11 @@ void FacetGlassPlugin::render(const RenderArguments& args)
         cmode = fg3d::kCacheNone;
         _cache = fg3d::CacheState();
     }
+    // Soft areas (same Off / Draft & Good / Always choices); never On Lens, where
+    // pixels see sharp separate copies rather than blur.
+    const int softSetting = choiceAt(_soft, t);
+    const bool softOn = ui.lensMount == 0 &&
+                        (softSetting == kPCacheAlways || (softSetting == kPCacheDraftGood && effQuality != kQualityFinal));
     auto cacheDone = [&](bool ok) {
         if (!ok) _cache = fg3d::CacheState();
         else if (cmode == fg3d::kCacheRecord) _cache.recorded(ckey);
@@ -679,6 +686,7 @@ void FacetGlassPlugin::render(const RenderArguments& args)
         f.winX2 = args.renderWindow.x2; f.winY2 = args.renderWindow.y2;
         f.cacheMode = cmode;
         f.cache = cmode != fg3d::kCacheNone ? static_cast<float*>(_gpuCache) : nullptr;
+        f.soft = softOn;
         if (const char* err = fg3d::renderCUDA(f, p, *sc)) {
             cacheDone(false);
             showMessage(std::string("FacetGlass CUDA: ") + err);
@@ -715,6 +723,7 @@ void FacetGlassPlugin::render(const RenderArguments& args)
         f.winX2 = args.renderWindow.x2; f.winY2 = args.renderWindow.y2;
         f.cacheMode = cmode;
         f.cache = cmode != fg3d::kCacheNone ? _gpuCache : nullptr;
+        f.soft = softOn;
         if (const char* err = fg3d::renderMetal(f, p, *sc)) {
             cacheDone(false);
             showMessage(std::string("FacetGlass Metal: ") + err);
@@ -758,7 +767,7 @@ void FacetGlassPlugin::render(const RenderArguments& args)
     fg3d::renderCPU(p, srcPyr.data(), gls ? glsPyr.data() : srcPyr.data(), *sc, args.renderWindow.x1,
                     args.renderWindow.x2, args.renderWindow.y1, args.renderWindow.y2, HostParallel{},
                     [&](int yy) { return static_cast<float*>(d->getPixelAddress(args.renderWindow.x1, yy)); }, cmode,
-                    cmode != fg3d::kCacheNone ? _cpuCache.data() : nullptr);
+                    cmode != fg3d::kCacheNone ? _cpuCache.data() : nullptr, softOn);
     cacheDone(true);
 }
 
@@ -1505,6 +1514,12 @@ void FacetGlassFactory::describeInContext(ImageEffectDescriptor& desc, ContextEn
             "approximation; by default Final quality always traces in full.", gt,
             { "Off", "On (Draft & Good)", "Always" }, kPCacheDraftGood);
         pc->setAnimates(false);
+        ChoiceParamDescriptor* sa = choice(desc, P_SOFT, "Soft Areas",
+            "Traces blurry parts of the glass at half resolution and fills them in smoothly: up to about 3x faster "
+            "on out-of-focus or frosted glass, with a slight loss of fine detail there. Sharp areas and On Lens "
+            "copies are always traced in full.", gt,
+            { "Off", "On (Draft & Good)", "Always" }, kPCacheDraftGood);
+        sa->setAnimates(false);
     }
     q->setAnimates(false);
     dbl(desc, P_DENOISE, "Denoise",

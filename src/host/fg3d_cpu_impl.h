@@ -62,14 +62,43 @@ void shadeCPU(const FG3DParams& p, const float* src, const float* gls, const Sce
 
 template <class ParFor, class RowFn>
 void renderCPU(const FG3DParams& p, const float* src, const float* gls, const SceneBuffers& s, int x0, int x1, int y0,
-               int y1, ParFor parFor, RowFn dstRow, int cacheMode, float* cache)
+               int y1, ParFor parFor, RowFn dstRow, int cacheMode, float* cache, bool soft)
 {
     const FG3DParams pp = p;
     const float* tris = s.tris.empty() ? nullptr : s.tris.data();
     const float* nf = s.nodesF.empty() ? nullptr : s.nodesF.data();
     const int* ni = s.nodesI.empty() ? nullptr : s.nodesI.data();
     if (!cache) cacheMode = kCacheNone;
+    if (cacheMode != kCacheNone) soft = false;
+    // Soft areas: half-resolution pre-pass over the region this render traces.
+    const CacheRegion reg = cacheRegion(p, x0, x1, y0, y1);
+    const FG3DParams ph = softHalfParams(p);
+    const SoftRegion sr = soft ? softRegion(p, reg.x0, reg.y0, reg.w, reg.h) : SoftRegion();
+    std::vector<float> half(soft ? (size_t)sr.hw * sr.hh * FG_AUX_FLOATS : 0);
+    if (soft && sr.hw > 0 && sr.hh > 0) {
+        parFor(0, sr.hh, [&](int j) {
+            for (int i = 0; i < sr.hw; ++i)
+                fg3d_trace(&ph, src, gls, tris, nf, ni, sr.hx0 + i, sr.hy0 + j, &half[((size_t)j * sr.hw + i) * FG_AUX_FLOATS]);
+        });
+    }
+    const int fx0 = (int)p.frameX, fy0 = (int)p.frameY;
     if (p.denoise <= 0.0f) {
+        if (cacheMode == kCacheNone && soft) {
+            parFor(y0, y1, [&](int y) {
+                float* d = dstRow(y);
+                float a[FG_AUX_FLOATS];
+                for (int x = x0; x < x1; ++x, d += 4) {
+                    fgv4 c;
+                    if (fg3d_soft_up(half.data(), sr.hw, sr.hh, sr.hx0, sr.hy0, x - fx0, y - fy0, FG_SOFT_SPREAD, a))
+                        c = fgv4m(a[0], a[1], a[2], a[3]);
+                    else
+                        c = fg3d_trace(&pp, src, gls, tris, nf, ni, x, y, nullptr);
+                    c = fg3d_finish(&pp, src, x, y, c);
+                    d[0] = c.x; d[1] = c.y; d[2] = c.z; d[3] = c.w;
+                }
+            });
+            return;
+        }
         if (cacheMode == kCacheNone) {
             parFor(y0, y1, [&](int y) { shadeCPU(p, src, gls, s, x0, x1, y, y + 1, dstRow); });
             return;
@@ -100,7 +129,13 @@ void renderCPU(const FG3DParams& p, const float* src, const float* gls, const Sc
             float* c = &cvA[((size_t)j * w + i) * FG_CV_FLOATS];
             float* rec = cache ? cache + ((size_t)j * w + i) * FG_CACHE_FLOATS : nullptr;
             if (cacheMode == kCacheNone) {
-                fg3d_trace(&pp, src, gls, tris, nf, ni, rx0 + i, ry0 + j, a);
+                float t[FG_AUX_FLOATS];
+                if (soft && fg3d_soft_up(half.data(), sr.hw, sr.hh, sr.hx0, sr.hy0, rx0 + i - fx0, ry0 + j - fy0,
+                                         FG_SOFT_SPREAD, t)) {
+                    for (int k = 0; k < FG_AUX_FLOATS; ++k) a[k] = t[k];
+                } else {
+                    fg3d_trace(&pp, src, gls, tris, nf, ni, rx0 + i, ry0 + j, a);
+                }
                 for (int k = 0; k < FG_CV_FLOATS; ++k) c[k] = a[k];
                 continue;
             }

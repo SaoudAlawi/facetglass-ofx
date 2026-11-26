@@ -30,7 +30,8 @@ void shadeCPU(const FG3DParams& p, const float* src, const float* gls, const Sce
 // cacheFloats(p, cacheRegion(p, x0, x1, y0, y1)) floats when the mode is not none.
 template <class ParFor, class RowFn>
 void renderCPU(const FG3DParams& p, const float* src, const float* gls, const SceneBuffers& s, int x0, int x1, int y0,
-               int y1, ParFor parFor, RowFn dstRow, int cacheMode = kCacheNone, float* cache = nullptr);
+               int y1, ParFor parFor, RowFn dstRow, int cacheMode = kCacheNone, float* cache = nullptr,
+               bool soft = false);
 
 }  // namespace fg3d
 
