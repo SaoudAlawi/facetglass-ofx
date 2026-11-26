@@ -497,6 +497,15 @@ FG_DEVICE fgv4 fg3d_trace(FG_PCONST const FG3DParams* p, FG_GLOBAL const float* 
   float zf = 1.0f / p->focusInv;
   float zg = 1.0f / p->glassFocusInv;
   float s = p->objScale;
+  fgv3 opos = fgv(p->objPos[0], p->objPos[1], p->objPos[2]);
+  if (p->lensMount != 0) {
+    /* Filter on the lens: centred on this pixel's central ray, sized to its cone. */
+    float d = p->objPos[2];
+    float pcx = ((fx + 0.5f) / W - 0.5f) * aspect, pcy = (fy + 0.5f) / H - 0.5f;
+    opos = fgv(pcx * d, pcy * d, d);
+    float cone = p->aperture * FG_FABS(1.0f - d / zf);
+    s = p->lensFill * FG_FMAX(cone, 0.25f * p->aperture) + 1e-7f;
+  }
   float eps = 2e-4f;               /* object-space ray offset */
 
   unsigned int pix = fg3d_hash((unsigned int)x * 1973u + (unsigned int)y * 9277u + (unsigned int)p->seed * 26699u);
@@ -599,7 +608,7 @@ FG_DEVICE fgv4 fg3d_trace(FG_PCONST const FG3DParams* p, FG_GLOBAL const float* 
     for (;;) {
       for (; b < p->maxBounces && seg < segMax; b++, seg++) {
         /* Into object space. */
-        fgv3 ro = fg3d_rotT(p, fgv_mul(fgv_sub(o, fgv(p->objPos[0], p->objPos[1], p->objPos[2])), 1.0f / s));
+        fgv3 ro = fg3d_rotT(p, fgv_mul(fgv_sub(o, opos), 1.0f / s));
         fgv3 rd = fg3d_rotT(p, d);
         float th = 0.0f, uh = 0.0f, vh = 0.0f;
         int k = fg3d_intersect(tris, nodesF, nodesI, p->numNodes, ro, rd, eps, &th, &uh, &vh);
@@ -628,7 +637,7 @@ FG_DEVICE fgv4 fg3d_trace(FG_PCONST const FG3DParams* p, FG_GLOBAL const float* 
         float F = fg3d_fresnel(cosi, n1, n2, &cost);
         int tir = F >= 1.0f ? 1 : 0;
         fgv3 nd;
-        fgv3 hitW = fgv_add(fgv(p->objPos[0], p->objPos[1], p->objPos[2]), fgv_mul(fg3d_rot(p, hitO), s));
+        fgv3 hitW = fgv_add(opos, fgv_mul(fg3d_rot(p, hitO), s));
         if (tir == 0 && entering != 0) {
           float fr = fg3d_clampf(F * p->reflect, 0.0f, 1.0f);
           if (fr > 0.0f) {

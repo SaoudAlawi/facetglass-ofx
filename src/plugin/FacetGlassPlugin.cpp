@@ -80,6 +80,7 @@
 #define P_ROUGH "roughness"
 #define P_INNER "innerReflections"
 #define P_GLASSTYPE "glassType"
+#define P_MOUNT "mount"
 #define P_TINT "tint"
 #define P_TINTD "tintDensity"
 #define P_BEVEL "bevelWidth"
@@ -154,6 +155,7 @@ ShapeUse shapeUse(int s)
     case kTwistedBar: u.prism = true; break;
     case kBentSlab: u.prism = u.thick = true; break;
     case kCustomOBJ: u.smooth = u.obj = true; break;
+    case kMultiImageRow: u.facets = u.prism = u.thick = true; break;
     default: break;
     }
     return u;
@@ -221,7 +223,7 @@ private:
 
     Clip *_dst, *_src, *_refract;
 
-    ChoiceParam *_shape, *_world, *_cspace, *_quality, *_gtype, *_previewQ;
+    ChoiceParam *_shape, *_world, *_cspace, *_quality, *_gtype, *_previewQ, *_mount;
     RGBParam* _tint;
     IntParam *_facets, *_detail, *_seed, *_bounces, *_minS, *_maxS;
     StringParam* _obj;
@@ -293,6 +295,7 @@ FacetGlassPlugin::FacetGlassPlugin(OfxImageEffectHandle handle) : ImageEffect(ha
     _denoise = fetchDoubleParam(P_DENOISE);
     _noise = fetchDoubleParam(P_NOISE);
     _center = fetchDouble2DParam(P_CENTER);
+    _mount = fetchChoiceParam(P_MOUNT);
     for (int i = 0; i < kNumLights; ++i) {
         _lpos[i] = fetchDouble2DParam(kLightPos[i]);
         _ldepth[i] = fetchDoubleParam(kLightDepth[i]);
@@ -351,6 +354,7 @@ void FacetGlassPlugin::readUI(double t, fg3d::UIParams& ui, bool interactive)
     ui.rotY = _turn->getValueAtTime(t);
     ui.rotZ = _roll->getValueAtTime(t);
     ui.size = _size->getValueAtTime(t);
+    ui.lensMount = choiceAt(_mount, t);
     ui.ior = _ior->getValueAtTime(t);
     ui.dispersion = _disp->getValueAtTime(t);
     ui.reflection = _refl->getValueAtTime(t);
@@ -1195,6 +1199,11 @@ void FacetGlassFactory::describeInContext(ImageEffectDescriptor& desc, ContextEn
 
     // ---------------------------------------------------------------- Placement
     GroupParamDescriptor* gp = group(desc, "placementGroup", "Placement");
+    choice(desc, P_MOUNT, "Mount",
+           "In Scene: the glass sits in front of the camera at a place in the frame. On Lens: the glass is a "
+           "filter on the lens, so the whole frame repeats through it (multi-image and circular ghosts); Size "
+           "then sets how much of the lens it covers (1 = all) and Center is not used.", gp,
+           { "In Scene", "On Lens" }, 0);
     point(desc, P_CENTER, "Center", "Position of the glass in the frame (0..1, y up).", gp, 0.5, 0.5);
     dbl(desc, P_DEPTH, "Depth", "Distance of the glass from the lens; the footage is at 1. Viewer: cyan bar.", gp, 0.15, 0.02, 0.6, 0.01, 0.95);
     for (const char* n : { P_TILT, P_TURN, P_ROLL }) {

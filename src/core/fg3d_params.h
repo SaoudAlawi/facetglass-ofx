@@ -110,6 +110,14 @@ typedef struct FG3DParams {
      whose whole lens cone misses it skip tracing when the footage is in focus. */
   float boundC[3];
   float boundR;
+
+  /* Lens mount: 1 = the glass is a filter on the lens. Per pixel it is centred
+     on the pixel's central ray at depth objPos[2] and scaled to the pixel's lens
+     cone there (times lensFill), so every pixel sees the whole filter, as with
+     a real multi-image filter: overlapping copies across the frame. */
+  int lensMount;
+  float lensFill;
+  int pad5, pad6;
 } FG3DParams;
 
 #endif

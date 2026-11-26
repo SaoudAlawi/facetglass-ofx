@@ -28,6 +28,8 @@ static const char* kLooks[][8] = {
     { "shape=21", "facets=7", "size=1.2", "depth=0.15", "center=0.3,0.4", "ior=1.7", "seed=3", "roughness=0.2" },
     { "shape=15", "size=0.7", "depth=0.15", "rotX=-35", "rotY=15", "ior=2.0", "focus=0.05", "innerReflect=0" },
     { "shape=15", "size=0.7", "depth=0.15", "rotX=-35", "glassType=8", "tint=1,0.7,0.35", "tintDensity=1.5", "innerReflect=2" },
+    { "lensMount=1", "shape=42", "facets=7", "prismAngle=1.5", "size=1.1", "fstop=2.8", "rotZ=10", nullptr },
+    { "lensMount=1", "shape=2", "facets=6", "prismAngle=3", "clearCentre=0.4", "size=1.1", "denoise=0.5", nullptr },
     { "shape=23", "size=0.6", "depth=0.25", "rotX=25", "rotY=35", "focus=0", "fstop=8", "colorSpace=3" },
     { "shape=27", "detail=2", "size=0.8", "depth=0.2", "world=5", "wobble=0.7", "time=31", nullptr },
     { "shape=11", "power=4", "size=2.5", "depth=0.15", "rotZ=180", "focus=0.5", "glassFocus=1", "fstop=2" },

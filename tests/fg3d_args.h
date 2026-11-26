@@ -58,6 +58,7 @@ inline bool applyArg(UIParams& ui, double& time, const char* arg)
     else if (k == "glassType") ui.glassType = (int)x;
     else if (k == "tint" && v.size() >= 3) { ui.tintR = v[0]; ui.tintG = v[1]; ui.tintB = v[2]; }
     else if (k == "tintDensity") ui.tintDensity = x;
+    else if (k == "lensMount") ui.lensMount = (int)x;
     else if (k == "bevelWidth") ui.bevelWidth = x;
     else if (k == "bevelAngle") ui.bevelAngle = x;
     else if (k == "maxBounces") ui.maxBounces = (int)x;

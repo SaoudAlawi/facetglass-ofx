@@ -348,6 +348,26 @@ void facetPlate(Mesh& m, const ShapeParams& sp)
     slabProfile(m, back, zf, 4.0);
 }
 
+// Multi-image row: N vertical strips across the back, strip k tilted by
+// (k - (N - 1) / 2) * angle, so the centre strip shows the subject unshifted and
+// the others throw copies evenly to both sides.
+void multiImageRow(Mesh& m, const ShapeParams& sp)
+{
+    const int N = std::max(2, std::min(sp.facets, 31));
+    const double t = std::max(0.02, (double)sp.thickness), zf = -t * 0.5, z0 = t * 0.5;
+    const double a = sp.prismAngleDeg * kPi / 180.0, w = 2.0 / N;
+    std::vector<std::pair<double, double>> back;
+    for (int k = 0; k < N; ++k) {
+        const double ang = std::max(-1.3, std::min(1.3, (k - 0.5 * (N - 1)) * a));
+        const double s = std::tan(ang);
+        const double xa = -1.0 + k * w, xb = xa + w;
+        const double za = s < 0 ? z0 - s * w : z0;
+        back.push_back({ xa, za });
+        back.push_back({ xb, za + s * w });
+    }
+    slabProfile(m, back, zf, 4.0);
+}
+
 void extrudeY(Mesh& m, const std::vector<std::pair<double, double>>& poly, double halfLen, int sideGroup)
 {
     const size_t n = poly.size();
@@ -882,7 +902,7 @@ const char* shapeName(int shape)
         "Pyramid", "Hexagonal Prism", "Ring",
         "Wavy Glass", "Fluted Glass", "Bubble Glass", "Water Drops", "Ice Cube", "Melted Blob", "Shards",
         "Twisted Bar", "Bent Slab",
-        "Custom OBJ" };
+        "Custom OBJ", "Multi-Image Row" };
     return shape >= 0 && shape < kShapeCount ? names[shape] : "?";
 }
 
@@ -893,6 +913,7 @@ const char* shapeCategory(int shape)
     if (shape <= kCrystalCluster) return "Gems";
     if (shape <= kTorus) return "Solids";
     if (shape <= kBentSlab) return "Organic";
+    if (shape == kMultiImageRow) return "Prisms & Filters";
     return "Custom";
 }
 
@@ -902,6 +923,7 @@ Mesh makeShape(const ShapeParams& sp, std::string* err)
     bool parity = true;
     switch (sp.shape) {
     case kFacetPlate: facetPlate(m, sp); break;
+    case kMultiImageRow: multiImageRow(m, sp); break;
     case kWedgePrism: {
         const double h = 0.577 * std::max(0.3, sp.thickness / 0.3);
         extrudeY(m, { { -1.0, -h }, { 1.0, -h }, { 0.0, 2 * h } }, 4.0, 0);

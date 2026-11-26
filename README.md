@@ -19,6 +19,8 @@ Free and open source under the MIT licence.
 - Real glass types (crown, flint, dense flint, fused quartz, acrylic, sapphire,
   cubic zirconia, diamond, water) with their true strength and rainbow spread, and
   coloured glass whose tint deepens with thickness.
+- On Lens mount: the glass becomes a filter on the lens, so the whole frame
+  repeats through it: multi-image rows, circular ghosts and halo rings.
 - **42 shapes** in six groups:
   - *Prisms & filters*: faceted plate (ghost repeats), wedge prism, radial prism
     (multi-image), half radial prism, kaleidoscope, halo ring, ripple rings

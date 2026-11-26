@@ -331,6 +331,11 @@ void makeParams(const UIParams& ui, float frameX, float frameY, float frameW, fl
                                                               p.objRot[3 * i + 2] * c[2]));
         p.boundR = (float)(p.objScale * std::sqrt(h[0] * h[0] + h[1] * h[1] + h[2] * h[2]));
     }
+    // On the lens the glass follows every pixel: Size = how much of the lens it covers.
+    p.lensMount = ui.lensMount != 0 ? 1 : 0;
+    p.lensFill = (float)std::max(ui.size, 0.005);
+    p.pad5 = p.pad6 = 0;
+    if (p.lensMount) p.boundR = 0.0f;
 }
 
 }  // namespace fg3d

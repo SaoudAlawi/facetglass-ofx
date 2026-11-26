@@ -63,6 +63,8 @@ enum Shape {
     kBentSlab,
     // Custom
     kCustomOBJ,
+    // Appended after the first public release (ids are stored in projects).
+    kMultiImageRow,    // flat front, back of N strips tilted in equal steps: an even row of repeats
     kShapeCount
 };
 
@@ -137,6 +139,7 @@ struct UIParams {
     int glassType = 0;                    // kGlassCustom uses ior/dispersion as set; others use real glass data
     double tintR = 1.0, tintG = 1.0, tintB = 1.0;  // colour seen through one object radius (white = clear)
     double tintDensity = 1.0;             // multiplies the tint's absorption
+    int lensMount = 0;                    // 0 = glass in the scene, 1 = filter on the lens
     double bevelWidth = 0.02, bevelAngle = 20.0;  // width relative to object size
     int maxBounces = 12;
     int minSamples = 16, maxSamples = 64;
