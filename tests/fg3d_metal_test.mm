@@ -172,6 +172,76 @@ int main(int argc, char** argv)
                         ok ? "ok  " : "FAIL", look, negStride ? " (neg stride)" : "", refract ? " (2x refract)" : "", maxd,
                         mean, badPct, diff, cpuMs, gpuMs);
         }
+        // Playback cache: record on frame A, replay on a different frame B; CPU and
+        // Metal replays must match exactly (record frames output the replay too).
+        if (!bench) {
+            std::vector<float> img2(n);
+            for (size_t i = 0; i < n; i += 4) {
+                img2[i] = img[i + 1] * 1.2f; img2[i + 1] = img[i + 2]; img2[i + 2] = img[i] * 0.9f; img2[i + 3] = img[i + 3];
+            }
+            const int cacheLooks[] = { 0, 3, 6, 8, 12 };
+            for (int look : cacheLooks) {
+                if (look >= nLooks) continue;
+                UIParams ui;
+                double time = 0;
+                for (int k = 0; k < 8 && kLooks[look][k]; ++k) applyArg(ui, time, kLooks[look][k]);
+                ui.shape.worldScale = (float)objectScale(ui);
+                ui.shape.depth = (float)ui.depth;
+                SceneBuffers scene;
+                buildScene(makeShape(ui.shape), (float)ui.bevelAngle, scene);
+                FG3DParams p;
+                makeParams(ui, 0, 0, (float)W, (float)H, time, scene, p);
+                const size_t cf = cacheFloats(p, cacheRegion(p, 0, W, 0, H));
+                std::vector<float> pyrA, pyrB, cpuRec(n), cpuRep(n), cache(cf);
+                int lv = 0;
+                buildPyramidCPU(img.data(), 0, 0, W, H, W * 4, 0, 0, W, H, ui.colorSpace, pyrA, lv);
+                buildPyramidCPU(img2.data(), 0, 0, W, H, W * 4, 0, 0, W, H, ui.colorSpace, pyrB, lv);
+                FG3DParams pc = p;
+                pc.srcW = pc.glsW = W; pc.srcH = pc.glsH = H; pc.srcLevels = pc.glsLevels = lv; pc.useSource = 0;
+                auto par = [](int b, int e, auto fn) {
+                    const unsigned nt = std::max(1u, std::thread::hardware_concurrency());
+                    std::vector<std::thread> pool;
+                    for (unsigned t = 0; t < nt; ++t)
+                        pool.emplace_back([&, t] { for (int i = b + (int)t; i < e; i += (int)nt) fn(i); });
+                    for (auto& th : pool) th.join();
+                };
+                renderCPU(pc, pyrA.data(), pyrA.data(), scene, 0, W, 0, H, par, [&](int y) { return &cpuRec[(size_t)y * W * 4]; },
+                          kCacheRecord, cache.data());
+                auto c0 = std::chrono::steady_clock::now();
+                renderCPU(pc, pyrB.data(), pyrB.data(), scene, 0, W, 0, H, par, [&](int y) { return &cpuRep[(size_t)y * W * 4]; },
+                          kCacheReplay, cache.data());
+                const double cpuMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count();
+
+                void* mcache = metalCacheAlloc((__bridge void*)queue, cf * 4);
+                MetalFrame fr;
+                fr.queue = (__bridge void*)queue;
+                fr.src.buffer = (__bridge void*)bSrc; fr.src.base = kPad;
+                fr.src.w = W; fr.src.h = H; fr.src.stride = W * 4;
+                fr.frameW = W; fr.frameH = H;
+                fr.dst = (__bridge void*)bDst; fr.dstBase = kPad; fr.dstStride = W * 4;
+                fr.winX2 = W; fr.winY2 = H; fr.wait = true; fr.cache = mcache;
+                std::memcpy((float*)bSrc.contents + kPad, img.data(), n * 4);
+                fr.cacheMode = kCacheRecord;
+                if (const char* err = renderMetal(fr, p, scene)) { std::fprintf(stderr, "renderMetal: %s\n", err); return 3; }
+                std::vector<float> mRec((const float*)bDst.contents + kPad, (const float*)bDst.contents + kPad + n);
+                std::memcpy((float*)bSrc.contents + kPad, img2.data(), n * 4);
+                fr.cacheMode = kCacheReplay;
+                auto g0 = std::chrono::steady_clock::now();
+                if (const char* err = renderMetal(fr, p, scene)) { std::fprintf(stderr, "renderMetal: %s\n", err); return 3; }
+                const double gpuMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g0).count();
+                const float* mRep = (const float*)bDst.contents + kPad;
+                metalCacheFree(mcache);
+                double dRec = 0, dRep = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    dRec = std::max(dRec, (double)std::fabs(cpuRec[i] - mRec[i]));
+                    dRep = std::max(dRep, (double)std::fabs(cpuRep[i] - mRep[i]));
+                }
+                const bool ok = dRec <= 1e-5 && dRep <= 1e-5;
+                allOk = allOk && ok;
+                std::printf("%s cache look %d: record max %.2e replay max %.2e  replay cpu %.1f ms metal %.1f ms\n",
+                            ok ? "ok  " : "FAIL", look, dRec, dRep, cpuMs, gpuMs);
+            }
+        }
         std::printf("%s\n", allOk ? "PASS" : "FAIL");
         return allOk ? 0 : 1;
     }

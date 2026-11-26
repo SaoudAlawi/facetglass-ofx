@@ -189,6 +189,18 @@ for n in (1, 3, 5, 11):
     ref = run_ref(f"look{n}", inp, W, H, ref_args(ui, S) + [f"look={n}"])
     out, info = run_host(f"look{n}", inp, W, H, ofx_args(ui, S), ["--look", str(n)])
     report(f"look preset {n}", out, ref, info)
+# Playback cache: the 2nd identical render records (and outputs the replay), the 3rd
+# replays; both must equal the renderer's record-then-replay (cache=1).
+for name, reps in (("halo", 2), ("halo", 3), ("echo_denoised", 3), ("gem_tiles", 3)):
+    ui = dict(BASE, **(LOOKS["gem"] if name == "gem_tiles" else {}))
+    extra_ref = [] if name == "gem_tiles" else [f"look={1 if name == 'halo' else 3}"]
+    extra_ofx = [] if name == "gem_tiles" else ["--look", "1" if name == "halo" else "3"]
+    if name == "echo_denoised":
+        ui["denoise"] = 0.5
+    ref = run_ref(f"cache_{name}_{reps}", inp, W, H, ref_args(ui, S) + extra_ref + ["cache=1"])
+    out, info = run_host(f"cache_{name}_{reps}", inp, W, H, ofx_args(ui, S) + ["playbackCache=2"],
+                         extra_ofx + ["--repeat", str(reps)] + (["--tiles", "1"] if name != "gem_tiles" else []))
+    report(f"playback cache {name} x{reps}", out, ref, info)
 # Preview Quality: interactive renders use Draft, final renders keep Final.
 ui = dict(BASE, **LOOKS["faceted_plate"])
 ref = run_ref("preview_draft", inp, W, H, ref_args(ui, QUALITY[0]))

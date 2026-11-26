@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "fg3d_backend_cuda.cuh"
+#include "fg3d_cache.h"
 #include "fg3d_cuda.h"
 
 namespace {
@@ -81,6 +82,47 @@ __global__ void finishKernel(FG3DParams p, const float* srcPyr, const float* cv,
     fgv4 o = fg3d_finish(&pp, srcPyr, x, y, fgv4m(c[0], c[1], c[2], c[3]));
     float* d = dst + (long long)(y - dstY1) * dstStride + (long long)(x - dstX1) * 4;
     d[0] = o.x; d[1] = o.y; d[2] = o.z; d[3] = o.w;
+}
+
+// Playback cache (see fg3d_core.h). Region (rx0, ry0, w, h).
+__global__ void recordKernel(FG3DParams p, const float* srcPyr, const float* glsPyr, const float* tris,
+                             const float* nodesF, const int* nodesI, float* cache, float* aux, int rx0, int ry0, int w,
+                             int h)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i >= w || j >= h) return;
+    FG3DParams pp = p;
+    float* a = aux ? aux + ((long long)j * w + i) * FG_AUX_FLOATS : nullptr;
+    fg3d_trace_cache(&pp, srcPyr, glsPyr, tris, nodesF, nodesI, rx0 + i, ry0 + j, a,
+                     cache + ((long long)j * w + i) * FG_CACHE_FLOATS);
+}
+
+__global__ void replayOutKernel(FG3DParams p, const float* srcPyr, const float* glsPyr, const float* cache, int rx0,
+                                int ry0, int rw, float* dst, int dstX1, int dstY1, int dstStride, int x0, int y0, int x1,
+                                int y1)
+{
+    const int x = x0 + blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = y0 + blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= x1 || y >= y1) return;
+    FG3DParams pp = p;
+    fgv4 c = fg3d_replay(&pp, srcPyr, glsPyr, cache + ((long long)(y - ry0) * rw + (x - rx0)) * FG_CACHE_FLOATS);
+    c = fg3d_finish(&pp, srcPyr, x, y, c);
+    float* o = dst + (long long)(y - dstY1) * dstStride + (long long)(x - dstX1) * 4;
+    o[0] = c.x; o[1] = c.y; o[2] = c.z; o[3] = c.w;
+}
+
+__global__ void replayCvKernel(FG3DParams p, const float* srcPyr, const float* glsPyr, const float* cache,
+                               const float* aux, float* cv, int w, int h)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i >= w || j >= h) return;
+    FG3DParams pp = p;
+    const long long k = (long long)j * w + i;
+    fgv4 c = fg3d_replay(&pp, srcPyr, glsPyr, cache + k * FG_CACHE_FLOATS);
+    float* o = cv + k * FG_CV_FLOATS;
+    o[0] = c.x; o[1] = c.y; o[2] = c.z; o[3] = c.w; o[4] = aux[k * FG_AUX_FLOATS + 4];
 }
 
 dim3 grid2d(int w, int h, dim3 b) { return dim3((w + b.x - 1) / b.x, (h + b.y - 1) / b.y); }
@@ -158,7 +200,32 @@ const char* renderCUDA(const CudaFrame& f, FG3DParams p, const SceneBuffers& sce
     p.useSource = hasGls ? 1 : 0;
 
     const int ww = f.winX2 - f.winX1, wh = f.winY2 - f.winY1;
-    if (dn && ww > 0 && wh > 0 && rw > 0 && rh > 0) {
+    const int cmode = f.cache ? f.cacheMode : fg3d::kCacheNone;
+    if (cmode != fg3d::kCacheNone && !dn && ww > 0 && wh > 0) {
+        // Region = window. Recording also outputs the replay (no change in look after frame 2).
+        const dim3 b(16, 8);
+        if (cmode == fg3d::kCacheRecord)
+            recordKernel<<<grid2d(ww, wh, b), b, 0, st>>>(p, srcPyr, glsPyr, tris, nodesF, nodesI, f.cache, nullptr,
+                                                          f.winX1, f.winY1, ww, wh);
+        replayOutKernel<<<grid2d(ww, wh, b), b, 0, st>>>(p, srcPyr, glsPyr, f.cache, f.winX1, f.winY1, ww, f.dst,
+                                                         f.dstX1, f.dstY1, f.dstStride, f.winX1, f.winY1, f.winX2,
+                                                         f.winY2);
+    } else if (cmode != fg3d::kCacheNone && dn && ww > 0 && wh > 0 && rw > 0 && rh > 0) {
+        float* caux = f.cache + (size_t)rw * rh * FG_CACHE_FLOATS;
+        float* cur = reinterpret_cast<float*>(mem + oCvA);
+        float* nxt = reinterpret_cast<float*>(mem + oCvB);
+        const dim3 b(16, 8);
+        if (cmode == fg3d::kCacheRecord)
+            recordKernel<<<grid2d(rw, rh, b), b, 0, st>>>(p, srcPyr, glsPyr, tris, nodesF, nodesI, f.cache, caux, rx0,
+                                                          ry0, rw, rh);
+        replayCvKernel<<<grid2d(rw, rh, b), b, 0, st>>>(p, srcPyr, glsPyr, f.cache, caux, cur, rw, rh);
+        for (int it = 0; it < FG_DENOISE_ITERS; ++it) {
+            atrousKernel<<<grid2d(rw, rh, b), b, 0, st>>>(caux, cur, nxt, rw, rh, 1 << it, p.denoise, p.frameH);
+            std::swap(cur, nxt);
+        }
+        finishKernel<<<grid2d(ww, wh, b), b, 0, st>>>(p, srcPyr, cur, rx0, ry0, rw, f.dst, f.dstX1, f.dstY1, f.dstStride,
+                                                      f.winX1, f.winY1, f.winX2, f.winY2);
+    } else if (dn && ww > 0 && wh > 0 && rw > 0 && rh > 0) {
         float* aux = reinterpret_cast<float*>(mem + oAux);
         float* cur = reinterpret_cast<float*>(mem + oCvA);
         float* nxt = reinterpret_cast<float*>(mem + oCvB);
@@ -182,6 +249,18 @@ const char* renderCUDA(const CudaFrame& f, FG3DParams p, const SceneBuffers& sce
         return err;
     }
     return nullptr;
+}
+
+float* cudaCacheAlloc(size_t bytes)
+{
+    void* m = nullptr;
+    if (bytes == 0 || cudaMalloc(&m, bytes) != cudaSuccess) return nullptr;
+    return static_cast<float*>(m);
+}
+
+void cudaCacheFree(float* buffer)
+{
+    if (buffer) cudaFree(buffer);
 }
 
 }  // namespace fg3d

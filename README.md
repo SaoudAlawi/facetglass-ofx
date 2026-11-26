@@ -19,6 +19,8 @@ Free and open source under the MIT licence.
 - Real glass types (crown, flint, dense flint, fused quartz, acrylic, sapphire,
   cubic zirconia, diamond, water) with their true strength and rainbow spread, and
   coloured glass whose tint deepens with thickness.
+- Playback cache: on shots where the glass does not move, playback replays the
+  traced light paths on each new frame, hundreds of times faster.
 - On Lens mount: the glass becomes a filter on the lens, so the whole frame
   repeats through it: multi-image rows, circular ghosts and halo rings.
 - **42 shapes** in six groups:

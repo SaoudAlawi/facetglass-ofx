@@ -62,35 +62,59 @@ void shadeCPU(const FG3DParams& p, const float* src, const float* gls, const Sce
 
 template <class ParFor, class RowFn>
 void renderCPU(const FG3DParams& p, const float* src, const float* gls, const SceneBuffers& s, int x0, int x1, int y0,
-               int y1, ParFor parFor, RowFn dstRow)
+               int y1, ParFor parFor, RowFn dstRow, int cacheMode, float* cache)
 {
-    if (p.denoise <= 0.0f) {
-        parFor(y0, y1, [&](int y) { shadeCPU(p, src, gls, s, x0, x1, y, y + 1, dstRow); });
-        return;
-    }
     const FG3DParams pp = p;
     const float* tris = s.tris.empty() ? nullptr : s.tris.data();
     const float* nf = s.nodesF.empty() ? nullptr : s.nodesF.data();
     const int* ni = s.nodesI.empty() ? nullptr : s.nodesI.data();
-    const int fx0 = (int)p.frameX, fy0 = (int)p.frameY, fx1 = fx0 + (int)p.frameW, fy1 = fy0 + (int)p.frameH;
-    const int rx0 = std::max(x0 - FG_DENOISE_PAD, fx0), rx1 = std::min(x1 + FG_DENOISE_PAD, fx1);
-    const int ry0 = std::max(y0 - FG_DENOISE_PAD, fy0), ry1 = std::min(y1 + FG_DENOISE_PAD, fy1);
-    const int w = rx1 - rx0, h = ry1 - ry0;
+    if (!cache) cacheMode = kCacheNone;
+    if (p.denoise <= 0.0f) {
+        if (cacheMode == kCacheNone) {
+            parFor(y0, y1, [&](int y) { shadeCPU(p, src, gls, s, x0, x1, y, y + 1, dstRow); });
+            return;
+        }
+        const int w = x1 - x0;
+        parFor(y0, y1, [&](int y) {
+            float* d = dstRow(y);
+            for (int x = x0; x < x1; ++x, d += 4) {
+                float* rec = cache + ((size_t)(y - y0) * w + (x - x0)) * FG_CACHE_FLOATS;
+                // Recording also outputs the replay, so playback does not change look after frame 2.
+                if (cacheMode == kCacheRecord) fg3d_trace_cache(&pp, src, gls, tris, nf, ni, x, y, nullptr, rec);
+                fgv4 c = fg3d_replay(&pp, src, gls, rec);
+                c = fg3d_finish(&pp, src, x, y, c);
+                d[0] = c.x; d[1] = c.y; d[2] = c.z; d[3] = c.w;
+            }
+        });
+        return;
+    }
+    const CacheRegion r = cacheRegion(p, x0, x1, y0, y1);
+    const int rx0 = r.x0, ry0 = r.y0, w = r.w, h = r.h;
     if (w <= 0 || h <= 0) return;
-    std::vector<float> aux((size_t)w * h * FG_AUX_FLOATS), cvA((size_t)w * h * FG_CV_FLOATS), cvB(cvA.size());
+    std::vector<float> auxOwn(cacheMode == kCacheNone ? (size_t)w * h * FG_AUX_FLOATS : 0);
+    float* aux = cacheMode == kCacheNone ? auxOwn.data() : cache + (size_t)w * h * FG_CACHE_FLOATS;
+    std::vector<float> cvA((size_t)w * h * FG_CV_FLOATS), cvB(cvA.size());
     parFor(0, h, [&](int j) {
         for (int i = 0; i < w; ++i) {
             float* a = &aux[((size_t)j * w + i) * FG_AUX_FLOATS];
-            fg3d_trace(&pp, src, gls, tris, nf, ni, rx0 + i, ry0 + j, a);
             float* c = &cvA[((size_t)j * w + i) * FG_CV_FLOATS];
-            for (int k = 0; k < FG_CV_FLOATS; ++k) c[k] = a[k];
+            float* rec = cache ? cache + ((size_t)j * w + i) * FG_CACHE_FLOATS : nullptr;
+            if (cacheMode == kCacheNone) {
+                fg3d_trace(&pp, src, gls, tris, nf, ni, rx0 + i, ry0 + j, a);
+                for (int k = 0; k < FG_CV_FLOATS; ++k) c[k] = a[k];
+                continue;
+            }
+            // Recording also outputs the replay (see above).
+            if (cacheMode == kCacheRecord) fg3d_trace_cache(&pp, src, gls, tris, nf, ni, rx0 + i, ry0 + j, a, rec);
+            fgv4 v = fg3d_replay(&pp, src, gls, rec);
+            c[0] = v.x; c[1] = v.y; c[2] = v.z; c[3] = v.w; c[4] = a[4];
         }
     });
     float* cur = cvA.data();
     float* nxt = cvB.data();
     for (int it = 0; it < FG_DENOISE_ITERS; ++it) {
         parFor(0, h, [&](int j) {
-            for (int i = 0; i < w; ++i) fg3d_atrous(aux.data(), cur, nxt, w, h, i, j, 1 << it, pp.denoise, pp.frameH);
+            for (int i = 0; i < w; ++i) fg3d_atrous(aux, cur, nxt, w, h, i, j, 1 << it, pp.denoise, pp.frameH);
         });
         std::swap(cur, nxt);
     }

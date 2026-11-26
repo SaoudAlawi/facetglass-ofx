@@ -26,7 +26,13 @@ struct MetalFrame {
     int dstX1 = 0, dstY1 = 0, dstStride = 0;
     int winX1 = 0, winY1 = 0, winX2 = 0, winY2 = 0;          // render window
     bool wait = false;            // block until the GPU has finished (tests)
+    int cacheMode = 0;            // fg3d::CacheMode (fg3d_cache.h)
+    void* cache = nullptr;        // id<MTLBuffer> from metalCacheAlloc, cacheFloats(...) floats
 };
+
+// Playback cache buffer on the queue's device (private storage); free with metalCacheFree.
+void* metalCacheAlloc(void* queue, size_t bytes);
+void metalCacheFree(void* buffer);
 
 // Renders the window. `p` comes from makeParams; image fields are filled here.
 // Returns nullptr on success, else an error text.

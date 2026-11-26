@@ -37,7 +37,9 @@ struct ParallelRows {
 int main(int argc, char** argv)
 {
     if (argc < 5) {
-        std::fprintf(stderr, "usage: fg3d_render in.raw out.raw W H [key=value ...]\n");
+        std::fprintf(stderr, "usage: fg3d_render in.raw out.raw W H [key=value ...] [cache=1] [cacheFrom=rec.raw]\n"
+                             "  cache=1: record the playback cache, then replay it (output = replay);\n"
+                             "  cacheFrom: record on this footage instead (replay on in.raw)\n");
         return 2;
     }
     const int W = std::atoi(argv[3]), H = std::atoi(argv[4]);
@@ -48,8 +50,15 @@ int main(int argc, char** argv)
 
     UIParams ui;
     double time = 0;
-    for (int a = 5; a < argc; ++a)
+    bool useCache = false;
+    int recMul = 1;
+    std::string cacheFrom;
+    for (int a = 5; a < argc; ++a) {
+        if (std::strcmp(argv[a], "cache=1") == 0) { useCache = true; continue; }
+        if (std::strncmp(argv[a], "cacheFrom=", 10) == 0) { cacheFrom = argv[a] + 10; useCache = true; continue; }
+        if (std::strncmp(argv[a], "recordSamples=", 14) == 0) { recMul = std::atoi(argv[a] + 14); continue; }
         if (!applyArg(ui, time, argv[a])) std::fprintf(stderr, "unknown argument %s\n", argv[a]);
+    }
 
     auto t0 = std::chrono::steady_clock::now();
     SceneBuffers scene;
@@ -66,15 +75,38 @@ int main(int argc, char** argv)
     makeParams(ui, 0, 0, (float)W, (float)H, time, scene, p);
     p.srcW = p.glsW = W; p.srcH = p.glsH = H; p.srcLevels = p.glsLevels = levels; p.useSource = 0;
 
-    renderCPU(p, pyr.data(), pyr.data(), scene, 0, W, 0, H, ParallelRows{},
-              [&](int yy) { return &out[(size_t)yy * W * 4]; });
+    auto rows = [&](int yy) { return &out[(size_t)yy * W * 4]; };
+    double recMs = 0;
+    if (useCache) {
+        std::vector<float> cache(cacheFloats(p, cacheRegion(p, 0, W, 0, H)));
+        std::vector<float> rpyr = pyr;
+        if (!cacheFrom.empty()) {
+            std::vector<float> rimg(img.size());
+            FILE* rf = std::fopen(cacheFrom.c_str(), "rb");
+            if (!rf || std::fread(rimg.data(), 4, rimg.size(), rf) != rimg.size()) { std::fprintf(stderr, "bad cacheFrom\n"); return 2; }
+            std::fclose(rf);
+            int l2 = 0;
+            buildPyramidCPU(rimg.data(), 0, 0, W, H, W * 4, 0, 0, W, H, ui.colorSpace, rpyr, l2);
+        }
+        FG3DParams pr = p;
+        pr.minSamples *= recMul; pr.maxSamples *= recMul;
+        renderCPU(pr, rpyr.data(), rpyr.data(), scene, 0, W, 0, H, ParallelRows{}, rows, kCacheRecord, cache.data());
+        auto tr = std::chrono::steady_clock::now();
+        recMs = std::chrono::duration<double, std::milli>(tr - t1).count();
+        t1 = tr;
+        renderCPU(p, pyr.data(), pyr.data(), scene, 0, W, 0, H, ParallelRows{}, rows, kCacheReplay, cache.data());
+    } else {
+        renderCPU(p, pyr.data(), pyr.data(), scene, 0, W, 0, H, ParallelRows{}, rows);
+    }
     auto t2 = std::chrono::steady_clock::now();
 
     f = std::fopen(argv[2], "wb");
     std::fwrite(out.data(), 4, out.size(), f);
     std::fclose(f);
-    std::printf("tris %d nodes %d scene %.1f ms render %.1f ms\n", scene.numTris(), scene.numNodes(),
-                std::chrono::duration<double, std::milli>(t1 - t0).count(),
+    std::printf("tris %d nodes %d scene %.1f ms render %.1f ms", scene.numTris(), scene.numNodes(),
+                std::chrono::duration<double, std::milli>(t1 - t0).count() - recMs,
                 std::chrono::duration<double, std::milli>(t2 - t1).count());
+    if (useCache) std::printf(" (record %.1f ms)", recMs);
+    std::printf("\n");
     return 0;
 }

@@ -157,6 +157,72 @@ int main(int argc, char** argv)
                     look, negStride ? " (neg stride)" : "", refract ? " (2x refract)" : "", maxd, mean, badPct, cpuMs,
                     gpuMs);
     }
+    // Playback cache: record on frame A, replay on a different frame B; CPU and
+    // CUDA replays must match exactly (record frames output the replay too).
+    {
+        std::vector<float> img2(img.size());
+        for (size_t i = 0; i < img.size(); i += 4) {
+            img2[i] = img[i + 1] * 1.2f; img2[i + 1] = img[i + 2]; img2[i + 2] = img[i] * 0.9f; img2[i + 3] = img[i + 3];
+        }
+        const int cacheLooks[] = { 0, 3, 6, 8, 12 };
+        for (int look : cacheLooks) {
+            if (look >= nLooks) continue;
+            UIParams ui;
+            double time = 0;
+            for (int k = 0; k < 8 && kLooks[look][k]; ++k) applyArg(ui, time, kLooks[look][k]);
+            ui.shape.worldScale = (float)objectScale(ui);
+            ui.shape.depth = (float)ui.depth;
+            SceneBuffers scene;
+            buildScene(makeShape(ui.shape), (float)ui.bevelAngle, scene);
+            FG3DParams p;
+            makeParams(ui, 0, 0, (float)W, (float)H, time, scene, p);
+            const size_t cf = cacheFloats(p, cacheRegion(p, 0, W, 0, H));
+            std::vector<float> pyrA, pyrB, cpuRec(img.size()), cpuRep(img.size()), cache(cf);
+            int lv = 0;
+            buildPyramidCPU(img.data(), 0, 0, W, H, W * 4, 0, 0, W, H, ui.colorSpace, pyrA, lv);
+            buildPyramidCPU(img2.data(), 0, 0, W, H, W * 4, 0, 0, W, H, ui.colorSpace, pyrB, lv);
+            FG3DParams pc = p;
+            pc.srcW = pc.glsW = W; pc.srcH = pc.glsH = H; pc.srcLevels = pc.glsLevels = lv; pc.useSource = 0;
+            auto par = [](int b, int e, auto fn) {
+                const unsigned nt = std::max(1u, std::thread::hardware_concurrency());
+                std::vector<std::thread> pool;
+                for (unsigned t = 0; t < nt; ++t)
+                    pool.emplace_back([&, t] { for (int i = b + (int)t; i < e; i += (int)nt) fn(i); });
+                for (auto& th : pool) th.join();
+            };
+            renderCPU(pc, pyrA.data(), pyrA.data(), scene, 0, W, 0, H, par, [&](int y) { return &cpuRec[(size_t)y * W * 4]; },
+                      kCacheRecord, cache.data());
+            renderCPU(pc, pyrB.data(), pyrB.data(), scene, 0, W, 0, H, par, [&](int y) { return &cpuRep[(size_t)y * W * 4]; },
+                      kCacheReplay, cache.data());
+
+            float* dcache = cudaCacheAlloc(cf * 4);
+            if (!dcache) { std::fprintf(stderr, "cudaCacheAlloc failed\n"); return 3; }
+            CudaFrame fr;
+            fr.src.data = dSrc; fr.src.w = W; fr.src.h = H; fr.src.stride = W * 4;
+            fr.frameW = W; fr.frameH = H;
+            fr.dst = dDst; fr.dstStride = W * 4;
+            fr.winX2 = W; fr.winY2 = H;
+            fr.cache = dcache;
+            std::vector<float> gRec(img.size()), gRep(img.size());
+            check(cudaMemcpy(dSrc, img.data(), img.size() * 4, cudaMemcpyHostToDevice), "upload A");
+            fr.cacheMode = kCacheRecord;
+            if (const char* err = renderCUDA(fr, p, scene)) { std::fprintf(stderr, "renderCUDA: %s\n", err); return 3; }
+            check(cudaMemcpy(gRec.data(), dDst, gRec.size() * 4, cudaMemcpyDeviceToHost), "download rec");
+            check(cudaMemcpy(dSrc, img2.data(), img2.size() * 4, cudaMemcpyHostToDevice), "upload B");
+            fr.cacheMode = kCacheReplay;
+            if (const char* err = renderCUDA(fr, p, scene)) { std::fprintf(stderr, "renderCUDA: %s\n", err); return 3; }
+            check(cudaMemcpy(gRep.data(), dDst, gRep.size() * 4, cudaMemcpyDeviceToHost), "download rep");
+            cudaCacheFree(dcache);
+            double dRec = 0, dRep = 0;
+            for (size_t i = 0; i < img.size(); ++i) {
+                dRec = std::max(dRec, (double)std::fabs(cpuRec[i] - gRec[i]));
+                dRep = std::max(dRep, (double)std::fabs(cpuRep[i] - gRep[i]));
+            }
+            const bool ok = dRec <= 1e-5 && dRep <= 1e-5;
+            allOk = allOk && ok;
+            std::printf("%s cache look %d: record max %.2e replay max %.2e\n", ok ? "ok  " : "FAIL", look, dRec, dRep);
+        }
+    }
     cudaFree(dSrc); cudaFree(dDst); cudaFree(dGls);
     std::printf("%s\n", allOk ? "PASS" : "FAIL");
     return allOk ? 0 : 1;

@@ -6,14 +6,16 @@ string(REPLACE "|" ";" dirs "${INCLUDE_DIRS}")
 
 file(READ "${INPUT}" src)
 set(done "")
-foreach(pass RANGE 20)
+foreach(pass RANGE 60)
   string(REGEX MATCH "#include \"([^\"]+)\"" m "${src}")
   if(NOT m)
     break()
   endif()
   set(name "${CMAKE_MATCH_1}")
+  # Headers are include-guarded; inline every occurrence (fg3d_trace.h is meant to
+  # be included twice).
   set(body "")
-  if(NOT name IN_LIST done)
+  if(TRUE)
     set(found "")
     foreach(dir IN LISTS dirs)
       if(NOT found AND EXISTS "${dir}/${name}")

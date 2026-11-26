@@ -23,7 +23,13 @@ struct CudaFrame {
     float* dst = nullptr;         // device pointer to pixel (dstX1, dstY1)
     int dstX1 = 0, dstY1 = 0, dstStride = 0;
     int winX1 = 0, winY1 = 0, winX2 = 0, winY2 = 0;          // render window
+    int cacheMode = 0;            // fg3d::CacheMode (fg3d_cache.h)
+    float* cache = nullptr;       // device memory from cudaCacheAlloc, cacheFloats(...) floats
 };
+
+// Playback cache buffer in device memory; free with cudaCacheFree. nullptr on failure.
+float* cudaCacheAlloc(size_t bytes);
+void cudaCacheFree(float* buffer);
 
 // Renders the window. `p` comes from makeParams (frame, scene, look fields);
 // image fields are filled here. Returns nullptr on success, else an error text.

@@ -82,7 +82,7 @@ if(APPLE AND FG_ENABLE_METAL)
     COMMAND ${CMAKE_COMMAND} -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/src/host/fg3d_metal_kernels.metal
             -DOUTPUT=${FG_MSL_OUT} "-DINCLUDE_DIRS=${CMAKE_CURRENT_SOURCE_DIR}/src/core|${CMAKE_CURRENT_SOURCE_DIR}/src/host"
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_msl.cmake
-    DEPENDS src/host/fg3d_metal_kernels.metal src/core/fg3d_backend_metal.h src/core/fg3d_core.h
+    DEPENDS src/host/fg3d_metal_kernels.metal src/core/fg3d_backend_metal.h src/core/fg3d_core.h src/core/fg3d_trace.h
             src/core/fg3d_params.h cmake/embed_msl.cmake
     COMMENT "Embedding Metal kernel source" VERBATIM)
   add_library(fg3d_metal STATIC src/host/fg3d_metal.mm ${FG_MSL_OUT})

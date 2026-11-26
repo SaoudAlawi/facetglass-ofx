@@ -17,6 +17,7 @@
 #include <memory>
 #include <functional>
 #include <mutex>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,7 @@
 #include "ofxsMultiThread.h"
 #include "ofxsProcessing.h"
 
+#include "fg3d_cache.h"
 #include "fg3d_cpu.h"
 #include "fg3d_presets.h"
 #ifdef FG_HAVE_CUDA
@@ -105,6 +107,7 @@
 #define P_CSPACE "inputColorSpace"
 #define P_QUALITY "quality"
 #define P_PREVIEWQ "previewQuality"
+#define P_PCACHE "playbackCache"
 #define P_MINS "minSamples"
 #define P_MAXS "maxSamples"
 #define P_NOISE "noiseThreshold"
@@ -118,6 +121,8 @@ static const char* kLightInt[kNumLights] = { "light1Intensity", "light2Intensity
 
 enum { kQualityDraft = 0, kQualityGood, kQualityFinal, kQualityCustom };
 enum { kPreviewSame = 0, kPreviewDraft, kPreviewGood };
+enum { kPCacheOff = 0, kPCacheDraftGood, kPCacheAlways };
+const size_t kMaxCacheBytes = (size_t)3 << 30;  // larger frames render without the cache
 
 using namespace OFX;
 
@@ -232,6 +237,7 @@ class FacetGlassPlugin : public ImageEffect
 {
 public:
     explicit FacetGlassPlugin(OfxImageEffectHandle handle);
+    ~FacetGlassPlugin() override;
 
     void render(const RenderArguments& args) override;
     bool isIdentity(const IsIdentityArguments& args, Clip*& identityClip, double& identityTime) override;
@@ -241,7 +247,8 @@ public:
     void applyLook(int index);
 
 private:
-    void readUI(double t, fg3d::UIParams& ui, bool interactive = false);
+    void readUI(double t, fg3d::UIParams& ui, bool interactive = false, int* effQuality = nullptr);
+    void releaseCache();
     std::shared_ptr<const fg3d::SceneBuffers> scene(const fg3d::UIParams& ui);
     void updateVisibility();
     // Persistent messages need the host's message suite V2, which not every host
@@ -259,7 +266,7 @@ private:
 
     Clip *_dst, *_src, *_refract;
 
-    ChoiceParam *_shape, *_world, *_cspace, *_quality, *_gtype, *_previewQ, *_mount, *_look;
+    ChoiceParam *_shape, *_world, *_cspace, *_quality, *_gtype, *_previewQ, *_mount, *_look, *_pcache;
     RGBParam* _tint;
     IntParam *_facets, *_detail, *_seed, *_bounces, *_minS, *_maxS;
     StringParam* _obj;
@@ -273,6 +280,13 @@ private:
     DoubleParam *_ldepth[kNumLights], *_lsize[kNumLights], *_lkelvin[kNumLights], *_lint[kNumLights];
 
     std::mutex _sceneMutex;
+    // Playback cache (one per instance, per backend; guarded by _cacheMutex).
+    std::mutex _cacheMutex;
+    fg3d::CacheState _cache;
+    std::vector<float> _cpuCache;
+    void* _gpuCache = nullptr;   // float* (CUDA) or id<MTLBuffer> (Metal)
+    size_t _gpuCacheBytes = 0;
+    int _gpuCacheBackend = 0;    // 1 = CUDA, 2 = Metal
     fg3d::ShapeParams _sceneKey;
     float _sceneBevel = -1.0f;
     std::shared_ptr<const fg3d::SceneBuffers> _scene;
@@ -289,6 +303,7 @@ FacetGlassPlugin::FacetGlassPlugin(OfxImageEffectHandle handle) : ImageEffect(ha
     _cspace = fetchChoiceParam(P_CSPACE);
     _quality = fetchChoiceParam(P_QUALITY);
     _previewQ = fetchChoiceParam(P_PREVIEWQ);
+    _pcache = fetchChoiceParam(P_PCACHE);
     _facets = fetchIntParam(P_FACETS);
     _detail = fetchIntParam(P_DETAIL);
     _seed = fetchIntParam(P_SEED);
@@ -419,7 +434,25 @@ void FacetGlassPlugin::changedParam(const InstanceChangedArgs& args, const std::
     }
 }
 
-void FacetGlassPlugin::readUI(double t, fg3d::UIParams& ui, bool interactive)
+FacetGlassPlugin::~FacetGlassPlugin() { releaseCache(); }
+
+void FacetGlassPlugin::releaseCache()
+{
+    std::lock_guard<std::mutex> lock(_cacheMutex);
+#ifdef FG_HAVE_CUDA
+    if (_gpuCacheBackend == 1) fg3d::cudaCacheFree(static_cast<float*>(_gpuCache));
+#endif
+#ifdef FG_HAVE_METAL
+    if (_gpuCacheBackend == 2) fg3d::metalCacheFree(_gpuCache);
+#endif
+    _gpuCache = nullptr;
+    _gpuCacheBytes = 0;
+    _gpuCacheBackend = 0;
+    std::vector<float>().swap(_cpuCache);
+    _cache = fg3d::CacheState();
+}
+
+void FacetGlassPlugin::readUI(double t, fg3d::UIParams& ui, bool interactive, int* effQuality)
 {
     ui.shape.shape = choiceAt(_shape, t);
     ui.shape.facets = _facets->getValueAtTime(t);
@@ -471,6 +504,7 @@ void FacetGlassPlugin::readUI(double t, fg3d::UIParams& ui, bool interactive)
     const int preview = choiceAt(_previewQ, t);
     if (interactive && preview == kPreviewDraft) quality = kQualityDraft;
     if (interactive && preview == kPreviewGood && quality != kQualityDraft) quality = kQualityGood;
+    if (effQuality) *effQuality = dragging ? (int)kQualityDraft : quality;
     switch (dragging ? (int)kQualityDraft : quality) {
     case kQualityDraft: ui.minSamples = 4; ui.maxSamples = 8; ui.noiseThreshold = 0.05; break;
     case kQualityGood: ui.minSamples = 16; ui.maxSamples = 64; ui.noiseThreshold = 0.025; break;
@@ -564,10 +598,61 @@ void FacetGlassPlugin::render(const RenderArguments& args)
     if (gls) gframe = toPixelEnclosing(_refract->getRegionOfDefinition(t), args.renderScale, _refract->getPixelAspectRatio());
 
     fg3d::UIParams ui;
-    readUI(t, ui, args.interactiveRenderStatus);
+    int effQuality = kQualityGood;
+    readUI(t, ui, args.interactiveRenderStatus, &effQuality);
     std::shared_ptr<const fg3d::SceneBuffers> sc = scene(ui);
     FG3DParams p;
     fg3d::makeParams(ui, (float)frame.x1, (float)frame.y1, (float)fw, (float)fh, t, *sc, p);
+
+    // Playback cache: trace normally, record (second identical render) or replay.
+    const int backend = args.isEnabledCudaRender ? 1 : (args.isEnabledMetalRender ? 2 : 0);
+    const int cacheSetting = choiceAt(_pcache, t);
+    const bool cacheOn = cacheSetting == kPCacheAlways || (cacheSetting == kPCacheDraftGood && effQuality != kQualityFinal);
+    if (!cacheOn && (_gpuCache || !_cpuCache.empty())) releaseCache();
+    std::unique_lock<std::mutex> cacheLock(_cacheMutex, std::defer_lock);
+    fg3d::CacheMode cmode = fg3d::kCacheNone;
+    std::vector<unsigned char> ckey;
+    const size_t cbytes = fg3d::cacheFloats(p, fg3d::cacheRegion(p, args.renderWindow.x1, args.renderWindow.x2,
+                                                                 args.renderWindow.y1, args.renderWindow.y2)) * 4;
+    if (cacheOn && cbytes > 0 && cbytes <= kMaxCacheBytes && cacheLock.try_lock()) {
+        ckey = fg3d::cacheKey(p, sc.get(), gls ? gframe.x2 - gframe.x1 : 0, gls ? gframe.y2 - gframe.y1 : 0,
+                              args.renderWindow.x1, args.renderWindow.x2, args.renderWindow.y1, args.renderWindow.y2,
+                              backend);
+        cmode = _cache.decide(ckey);
+    }
+    // Makes sure the cache buffer for this backend exists; false: render without it.
+    auto ensureGpuCache = [&](void* queue) -> bool {
+        if (_gpuCache && _gpuCacheBackend == backend && _gpuCacheBytes == cbytes) return true;
+#ifdef FG_HAVE_CUDA
+        if (_gpuCacheBackend == 1) fg3d::cudaCacheFree(static_cast<float*>(_gpuCache));
+#endif
+#ifdef FG_HAVE_METAL
+        if (_gpuCacheBackend == 2) fg3d::metalCacheFree(_gpuCache);
+#endif
+        _gpuCache = nullptr; _gpuCacheBytes = 0; _gpuCacheBackend = 0;
+        (void)queue;
+#ifdef FG_HAVE_CUDA
+        if (backend == 1) _gpuCache = fg3d::cudaCacheAlloc(cbytes);
+#endif
+#ifdef FG_HAVE_METAL
+        if (backend == 2) _gpuCache = fg3d::metalCacheAlloc(queue, cbytes);
+#endif
+        if (!_gpuCache) return false;
+        _gpuCacheBytes = cbytes; _gpuCacheBackend = backend;
+        return true;
+    };
+    if (cmode == fg3d::kCacheRecord && backend != 0 && !ensureGpuCache(args.isEnabledMetalRender ? args.pMetalCmdQ : nullptr)) {
+        cmode = fg3d::kCacheNone;
+        _cache = fg3d::CacheState();
+    }
+    if (cmode == fg3d::kCacheReplay && backend != 0 && !(_gpuCache && _gpuCacheBackend == backend)) {
+        cmode = fg3d::kCacheNone;
+        _cache = fg3d::CacheState();
+    }
+    auto cacheDone = [&](bool ok) {
+        if (!ok) _cache = fg3d::CacheState();
+        else if (cmode == fg3d::kCacheRecord) _cache.recorded(ckey);
+    };
 
     const OfxRectI sb = src->getBounds();
     const int srcStride = src->getRowBytes() / 4;
@@ -592,10 +677,14 @@ void FacetGlassPlugin::render(const RenderArguments& args)
         f.dstX1 = db.x1; f.dstY1 = db.y1; f.dstStride = dst->getRowBytes() / 4;
         f.winX1 = args.renderWindow.x1; f.winY1 = args.renderWindow.y1;
         f.winX2 = args.renderWindow.x2; f.winY2 = args.renderWindow.y2;
+        f.cacheMode = cmode;
+        f.cache = cmode != fg3d::kCacheNone ? static_cast<float*>(_gpuCache) : nullptr;
         if (const char* err = fg3d::renderCUDA(f, p, *sc)) {
+            cacheDone(false);
             showMessage(std::string("FacetGlass CUDA: ") + err);
             throwSuiteStatusException(kOfxStatFailed);
         }
+        cacheDone(true);
         return;
     }
 #endif
@@ -624,10 +713,14 @@ void FacetGlassPlugin::render(const RenderArguments& args)
         f.dst = d.buffer; f.dstBase = d.base; f.dstX1 = d.x1; f.dstY1 = d.y1; f.dstStride = d.stride;
         f.winX1 = args.renderWindow.x1; f.winY1 = args.renderWindow.y1;
         f.winX2 = args.renderWindow.x2; f.winY2 = args.renderWindow.y2;
+        f.cacheMode = cmode;
+        f.cache = cmode != fg3d::kCacheNone ? _gpuCache : nullptr;
         if (const char* err = fg3d::renderMetal(f, p, *sc)) {
+            cacheDone(false);
             showMessage(std::string("FacetGlass Metal: ") + err);
             throwSuiteStatusException(kOfxStatFailed);
         }
+        cacheDone(true);
         return;
     }
 #endif
@@ -650,9 +743,23 @@ void FacetGlassPlugin::render(const RenderArguments& args)
         p.glsW = gw; p.glsH = gh; p.glsLevels = glevels; p.useSource = 1;
     }
     Image* d = dst.get();
+    if (cmode == fg3d::kCacheRecord) {
+        try {
+            _cpuCache.resize(cbytes / 4);
+        } catch (const std::bad_alloc&) {
+            cmode = fg3d::kCacheNone;
+            _cache = fg3d::CacheState();
+        }
+    }
+    if (cmode == fg3d::kCacheReplay && _cpuCache.size() != cbytes / 4) {
+        cmode = fg3d::kCacheNone;
+        _cache = fg3d::CacheState();
+    }
     fg3d::renderCPU(p, srcPyr.data(), gls ? glsPyr.data() : srcPyr.data(), *sc, args.renderWindow.x1,
                     args.renderWindow.x2, args.renderWindow.y1, args.renderWindow.y2, HostParallel{},
-                    [&](int yy) { return static_cast<float*>(d->getPixelAddress(args.renderWindow.x1, yy)); });
+                    [&](int yy) { return static_cast<float*>(d->getPixelAddress(args.renderWindow.x1, yy)); }, cmode,
+                    cmode != fg3d::kCacheNone ? _cpuCache.data() : nullptr);
+    cacheDone(true);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1391,6 +1498,14 @@ void FacetGlassFactory::describeInContext(ImageEffectDescriptor& desc, ContextEn
            "Quality for interactive viewer renders; Deliver always uses Quality. Set Quality to Final and this "
            "to Draft or Good for fast previews and clean final renders.", gt,
            { "Same as Quality", "Draft", "Good" }, kPreviewSame);
+    {
+        ChoiceParamDescriptor* pc = choice(desc, P_PCACHE, "Playback Cache",
+            "When only the footage changes between frames (no animation of the glass), FacetGlass remembers where "
+            "every pixel's light lands and replays it on new frames, hundreds of times faster. Replay is a close "
+            "approximation; by default Final quality always traces in full.", gt,
+            { "Off", "On (Draft & Good)", "Always" }, kPCacheDraftGood);
+        pc->setAnimates(false);
+    }
     q->setAnimates(false);
     dbl(desc, P_DENOISE, "Denoise",
         "Smooths leftover grain while keeping facet edges and detail (0 = off). Works best with Good or Final.", gt,

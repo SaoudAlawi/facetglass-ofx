@@ -9,6 +9,7 @@
 #include <mutex>
 #include <utility>
 
+#include "fg3d_cache.h"
 #include "fg3d_metal.h"
 #include "fg3d_metal_src.h"  // generated: const char* kFG3DMetalSource
 
@@ -30,7 +31,7 @@ struct FGWinArgs {
 };
 
 struct Pipelines {
-    id<MTLComputePipelineState> decode, mip, shade, trace, atrous, finish;
+    id<MTLComputePipelineState> decode, mip, shade, trace, atrous, finish, rec, replayOut, replayCv;
 };
 
 // Compiled once per device (the source compiles in a fraction of a second).
@@ -76,7 +77,11 @@ const Pipelines* pipelinesFor(id<MTLDevice> dev, const char** err)
     p->trace = make("fg_trace");
     p->atrous = make("fg_atrous");
     p->finish = make("fg_finish");
-    if (!p->decode || !p->mip || !p->shade || !p->trace || !p->atrous || !p->finish) {
+    p->rec = make("fg_trace_rec");
+    p->replayOut = make("fg_replay_out");
+    p->replayCv = make("fg_replay_cv");
+    if (!p->decode || !p->mip || !p->shade || !p->trace || !p->atrous || !p->finish || !p->rec || !p->replayOut ||
+        !p->replayCv) {
         delete p;
         *err = msg;
         return nullptr;
@@ -195,7 +200,66 @@ const char* renderMetal(const MetalFrame& f, FG3DParams p, const SceneBuffers& s
             [enc setBuffer:nodesF offset:0 atIndex:4];
             [enc setBuffer:nodesI offset:0 atIndex:5];
         };
-        if (dn && rw > 0 && rh > 0) {
+        id<MTLBuffer> cacheBuf = (__bridge id<MTLBuffer>)f.cache;
+        const int cmode = cacheBuf ? f.cacheMode : kCacheNone;
+        if (cmode != kCacheNone && !dn) {
+            // Region = window. Recording also outputs the replay (no change in look after frame 2).
+            a.rx0 = f.winX1; a.ry0 = f.winY1; a.rw = ww; a.rh = wh; a.pad = 0;
+            if (cmode == kCacheRecord) {
+                bindScene();
+                [enc setBuffer:cacheBuf offset:0 atIndex:6];
+                [enc setBuffer:cacheBuf offset:0 atIndex:7];
+                [enc setBytes:&a length:sizeof a atIndex:8];
+                dispatch2d(enc, ps->rec, ww, wh);
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            }
+            [enc setBytes:&p length:sizeof p atIndex:0];
+            [enc setBuffer:srcPyr offset:0 atIndex:1];
+            [enc setBuffer:glsPyr offset:0 atIndex:2];
+            [enc setBuffer:cacheBuf offset:0 atIndex:3];
+            [enc setBuffer:dst offset:0 atIndex:4];
+            [enc setBytes:&a length:sizeof a atIndex:5];
+            dispatch2d(enc, ps->replayOut, ww, wh);
+        } else if (cmode != kCacheNone && rw > 0 && rh > 0) {
+            const size_t auxOff = (size_t)rw * rh * FG_CACHE_FLOATS * 4;
+            id<MTLBuffer> cur = [dev newBufferWithLength:(size_t)rw * rh * FG_CV_FLOATS * 4 options:MTLResourceStorageModePrivate];
+            id<MTLBuffer> nxt = [dev newBufferWithLength:(size_t)rw * rh * FG_CV_FLOATS * 4 options:MTLResourceStorageModePrivate];
+            if (!cur || !nxt) { [enc endEncoding]; return "Metal buffer allocation failed"; }
+            a.pad = 1;
+            if (cmode == kCacheRecord) {
+                bindScene();
+                [enc setBuffer:cacheBuf offset:0 atIndex:6];
+                [enc setBuffer:cacheBuf offset:auxOff atIndex:7];
+                [enc setBytes:&a length:sizeof a atIndex:8];
+                dispatch2d(enc, ps->rec, rw, rh);
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            }
+            [enc setBytes:&p length:sizeof p atIndex:0];
+            [enc setBuffer:srcPyr offset:0 atIndex:1];
+            [enc setBuffer:glsPyr offset:0 atIndex:2];
+            [enc setBuffer:cacheBuf offset:0 atIndex:3];
+            [enc setBuffer:cacheBuf offset:auxOff atIndex:4];
+            [enc setBuffer:cur offset:0 atIndex:5];
+            [enc setBytes:&a length:sizeof a atIndex:6];
+            dispatch2d(enc, ps->replayCv, rw, rh);
+            for (int it = 0; it < FG_DENOISE_ITERS; ++it) {
+                a.step = 1 << it;
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+                [enc setBuffer:cacheBuf offset:auxOff atIndex:0];
+                [enc setBuffer:cur offset:0 atIndex:1];
+                [enc setBuffer:nxt offset:0 atIndex:2];
+                [enc setBytes:&a length:sizeof a atIndex:3];
+                dispatch2d(enc, ps->atrous, rw, rh);
+                std::swap(cur, nxt);
+            }
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            [enc setBytes:&p length:sizeof p atIndex:0];
+            [enc setBuffer:srcPyr offset:0 atIndex:1];
+            [enc setBuffer:cur offset:0 atIndex:2];
+            [enc setBuffer:dst offset:0 atIndex:3];
+            [enc setBytes:&a length:sizeof a atIndex:4];
+            dispatch2d(enc, ps->finish, ww, wh);
+        } else if (dn && rw > 0 && rh > 0) {
             id<MTLBuffer> aux = [dev newBufferWithLength:(size_t)rw * rh * FG_AUX_FLOATS * 4 options:MTLResourceStorageModePrivate];
             id<MTLBuffer> cur = [dev newBufferWithLength:(size_t)rw * rh * FG_CV_FLOATS * 4 options:MTLResourceStorageModePrivate];
             id<MTLBuffer> nxt = [dev newBufferWithLength:(size_t)rw * rh * FG_CV_FLOATS * 4 options:MTLResourceStorageModePrivate];
@@ -240,6 +304,22 @@ const char* renderMetal(const MetalFrame& f, FG3DParams p, const SceneBuffers& s
         }
     }
     return nullptr;
+}
+
+void* metalCacheAlloc(void* queue, size_t bytes)
+{
+    @autoreleasepool {
+        id<MTLCommandQueue> q = (__bridge id<MTLCommandQueue>)queue;
+        id<MTLDevice> dev = q ? q.device : MTLCreateSystemDefaultDevice();
+        if (!dev || bytes == 0) return nullptr;
+        id<MTLBuffer> b = [dev newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
+        return b ? (__bridge_retained void*)b : nullptr;
+    }
+}
+
+void metalCacheFree(void* buffer)
+{
+    if (buffer) CFRelease(buffer);
 }
 
 }  // namespace fg3d

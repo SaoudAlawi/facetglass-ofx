@@ -5,6 +5,7 @@
 
 #include <vector>
 
+#include "fg3d_cache.h"
 #include "fg3d_scene.h"
 
 namespace fg3d {
@@ -25,9 +26,11 @@ void shadeCPU(const FG3DParams& p, const float* src, const float* gls, const Sce
 // (then a padded region is traced so tiles match a full-frame render exactly).
 // parFor(begin, end, fn) must call fn(i) for every i in [begin, end), in parallel
 // if it likes; dstRow(y) returns a pointer to pixel x0 of row y.
+// cacheMode / cache: playback cache (fg3d_cache.h); cache holds
+// cacheFloats(p, cacheRegion(p, x0, x1, y0, y1)) floats when the mode is not none.
 template <class ParFor, class RowFn>
 void renderCPU(const FG3DParams& p, const float* src, const float* gls, const SceneBuffers& s, int x0, int x1, int y0,
-               int y1, ParFor parFor, RowFn dstRow);
+               int y1, ParFor parFor, RowFn dstRow, int cacheMode = kCacheNone, float* cache = nullptr);
 
 }  // namespace fg3d
 

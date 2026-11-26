@@ -16,6 +16,7 @@
 //              [--time <t>]                      frame number (default 0)
 //              [--negstride]                     store images top-down (negative rowBytes)
 //              [--minimal-host]                  no message suite V2, like DaVinci Resolve
+//              [--repeat <n>]                    render the frame n times in this instance (playback cache)
 //              [--look <n>]                      pick Look preset n as a user would (instance changed)
 //              [--interactive]                   mark renders as interactive (viewer), not final
 //              [--metal]                         macOS: images are MTLBuffers, render gets a Metal queue
@@ -134,6 +135,7 @@ struct Options {
     bool metal = false;        // images as MTLBuffers + Metal render (macOS)
     bool interactive = false;  // renderAction interactive flag
     int look = -1;             // --look: Look menu index chosen by the "user"
+    int repeat = 1;            // --repeat: renders of the same frame
     std::vector<std::pair<std::string, std::vector<double>>> params;
     std::vector<std::pair<std::string, std::string>> strParams;  // name:=text
 };
@@ -557,6 +559,7 @@ static void parseArgs(int argc, char** argv)
         else if (a == "--minimal-host") { o.minimalHost = true; }
         else if (a == "--interactive") { o.interactive = true; }
         else if (a == "--look") { need(1); o.look = std::atoi(argv[++i]); }
+        else if (a == "--repeat") { need(1); o.repeat = std::max(1, std::atoi(argv[++i])); }
         else if (a == "--metal") {
 #ifdef __APPLE__
             o.metal = true;
@@ -686,6 +689,7 @@ int main(int argc, char** argv)
     // Render as an n x n grid of render windows; report the RoIs requested for each.
     int nTiles = 0;
     bool roiFull = true;
+    for (int rep = 0; rep < o.repeat; ++rep)
     for (int ty = 0; ty < o.tiles; ++ty) {
         for (int tx = 0; tx < o.tiles; ++tx) {
             OfxRectI win;

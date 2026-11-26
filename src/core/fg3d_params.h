@@ -45,6 +45,16 @@
    branch weight worth tracing. */
 #define FG_BRANCH_STACK 4
 #define FG_BRANCH_MIN 0.01f
+/* Playback cache record per pixel: virtual light RGB, slot count, then
+   FG_CACHE_SLOTS slots of (u, v, spread u, spread v, lod + 32 * flags,
+   weight R, G, B, A);
+   flags: 1 = refract source, 2 = highlight boost. FG_SLOT_ACC: accumulators
+   while recording. */
+#define FG_CACHE_SLOTS 6
+#define FG_CACHE_REACH 2.0f   /* base merge radius, pixels */
+#define FG_SLOT_FLOATS 9
+#define FG_SLOT_ACC 12
+#define FG_CACHE_FLOATS (4 + FG_CACHE_SLOTS * FG_SLOT_FLOATS)
 
 /* Denoiser buffers (per pixel of the padded render region, tightly packed).
  * Aux: 0..3 linear RGBA, 4 luminance variance of the pixel mean, 5 glass

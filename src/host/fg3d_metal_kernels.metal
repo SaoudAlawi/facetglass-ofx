@@ -93,3 +93,43 @@ kernel void fg_finish(constant FG3DParams& p [[buffer(0)]], device const float* 
     device float* d = dst + a.dstBase + (y - a.dstY1) * a.dstStride + (x - a.dstX1) * 4;
     d[0] = o.x; d[1] = o.y; d[2] = o.z; d[3] = o.w;
 }
+
+// Playback cache. Region (rx0, ry0, rw, rh) is the window, or the denoiser's
+// padded region; a.pad != 0: also write the denoiser guides (aux).
+kernel void fg_trace_rec(constant FG3DParams& p [[buffer(0)]], device const float* srcPyr [[buffer(1)]],
+                         device const float* glsPyr [[buffer(2)]], device const float* tris [[buffer(3)]],
+                         device const float* nodesF [[buffer(4)]], device const int* nodesI [[buffer(5)]],
+                         device float* cache [[buffer(6)]], device float* aux [[buffer(7)]],
+                         constant FGWinArgs& a [[buffer(8)]], uint2 gid [[thread_position_in_grid]])
+{
+    const int i = (int)gid.x, j = (int)gid.y;
+    if (i >= a.rw || j >= a.rh) return;
+    device float* ax = a.pad != 0 ? aux + (j * a.rw + i) * FG_AUX_FLOATS : nullptr;
+    fg3d_trace_cache(&p, srcPyr, glsPyr, tris, nodesF, nodesI, a.rx0 + i, a.ry0 + j, ax,
+                     cache + (j * a.rw + i) * FG_CACHE_FLOATS);
+}
+
+kernel void fg_replay_out(constant FG3DParams& p [[buffer(0)]], device const float* srcPyr [[buffer(1)]],
+                          device const float* glsPyr [[buffer(2)]], device const float* cache [[buffer(3)]],
+                          device float* dst [[buffer(4)]], constant FGWinArgs& a [[buffer(5)]],
+                          uint2 gid [[thread_position_in_grid]])
+{
+    const int x = a.x0 + (int)gid.x, y = a.y0 + (int)gid.y;
+    if (x >= a.x1 || y >= a.y1) return;
+    fgv4 c = fg3d_replay(&p, srcPyr, glsPyr, cache + ((y - a.ry0) * a.rw + (x - a.rx0)) * FG_CACHE_FLOATS);
+    c = fg3d_finish(&p, srcPyr, x, y, c);
+    device float* o = dst + a.dstBase + (y - a.dstY1) * a.dstStride + (x - a.dstX1) * 4;
+    o[0] = c.x; o[1] = c.y; o[2] = c.z; o[3] = c.w;
+}
+
+kernel void fg_replay_cv(constant FG3DParams& p [[buffer(0)]], device const float* srcPyr [[buffer(1)]],
+                         device const float* glsPyr [[buffer(2)]], device const float* cache [[buffer(3)]],
+                         device const float* aux [[buffer(4)]], device float* cv [[buffer(5)]],
+                         constant FGWinArgs& a [[buffer(6)]], uint2 gid [[thread_position_in_grid]])
+{
+    const int i = (int)gid.x, j = (int)gid.y;
+    if (i >= a.rw || j >= a.rh) return;
+    fgv4 c = fg3d_replay(&p, srcPyr, glsPyr, cache + (j * a.rw + i) * FG_CACHE_FLOATS);
+    device float* o = cv + (j * a.rw + i) * FG_CV_FLOATS;
+    o[0] = c.x; o[1] = c.y; o[2] = c.z; o[3] = c.w; o[4] = aux[(j * a.rw + i) * FG_AUX_FLOATS + 4];
+}
