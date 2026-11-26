@@ -61,6 +61,11 @@ Install (admin, ask Saoud first): `powershell -ExecutionPolicy Bypass -File tool
 
 Host quirks learned in Resolve: never call `setPersistentMessage` / `clearPersistentMessage` (or any optional suite) unguarded: the Support library throws when the host lacks the suite, and a throw inside render makes Resolve show the untouched source. Use `showMessage()`. The test host provides every suite, so it cannot catch this.
 
+## Looks (presets)
+
+`src/host/fg3d_presets.cpp`: 16 looks as renderer `key=value` strings applied over a neutral base (every creative control; motion, lights and technical settings untouched). Plugin: **Look** menu at the top (`look`, "Custom" + presets; append only). Picking one (user edit) applies base + preset through `kPresetKeys` (renderer key -> OFX param, type); a manual edit of any mapped param sets Look back to Custom. Renderer/tests: `look=N`; test host `--look N` sends a real instance-changed; compare_ofx checks looks 1, 3, 5, 11. Gallery `docs/looks.jpg` (render with look=N on a dark, practically lit plate). Tune presets on dark footage with a lit subject: that is what the demo uses and what reads well. Lenslet shapes (fluted, honeycomb) stay soft at any f-stop, so they have no preset yet.
+UX lessons from the public demo: presets give a striking composed shot immediately; the in-scene halo ring framing the subject is the "circular ghost" of its car opening; rows of overlapping copies come from facets smaller than the lens opening (On Lens).
+
 ## Speed notes (2026-11-26, M4 Pro, 1080p)
 
 The Metal kernel is compute-bound: thread-group shape, BVH stack size and fast maths (about 13%, and it breaks exactness) barely matter. Done: parameters in constant memory (`FG_PCONST`), nearest-first BVH traversal (both child boxes tested, misses skipped), and a per-pixel lens-cone vs bounding-sphere test that passes footage through untouched when Focus = 1 and the glass cannot be reached (`boundC`/`boundR`). Time is dominated by glass pixels running to maxSamples; the practical lever is **Preview Quality** (Technical, `previewQuality`: Same / Draft / Good, applied when the host sets interactiveRenderStatus; Draft is about 7.6x faster than Good). `fg3d_metal_test <in.raw> W H --bench` times Metal per look. Ideas not yet tried: wavefront/sorted rendering to cut divergence, fewer samples where the denoiser is on.

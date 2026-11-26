@@ -48,6 +48,13 @@ Free and open source under the MIT licence.
 - **Low grain**: blue-noise low-discrepancy sampling, adaptive samples and an
   edge-aware **denoiser** that keeps facet edges and sharp detail.
 
+## Looks
+
+Pick a starting point from **Look** at the top of the controls, then adjust. Changing
+any glass setting by hand turns Look back to Custom.
+
+![Looks](docs/looks.jpg)
+
 ## Viewer controls
 
 Select the FacetGlass node and set the viewer's on-screen controls to

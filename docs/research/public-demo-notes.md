@@ -113,3 +113,16 @@ dodecahedron, icosahedron) and geodesic spheres at subdivision levels 0-3; a
 
 FacetGlass covers these kinds with its own procedural generators and its own
 names (see `fg3d::shapeName`).
+
+## Workflow and presets (reviewed 2026-11-26)
+
+- The flow shown: set input colour space, pick a preset ("our presets are a good starting
+  point", 0:45), nudge with the viewer gizmo (it drops to an interactive quality while
+  dragging, 3:25-3:49), add a recorded hand-held motion loop, then switch on a final-quality
+  toggle that applies to every instance before export (1:45-1:58).
+- Each preset jumps to a composed, striking result: stacked full copies of the subject, a
+  light streak, curved ghost arcs framing the subject (opening car shots, 0:00-0:03: a large
+  ring of glass with a wide clear centre), a row of 5-7 overlapping copies (4:21).
+- User presets can be saved and set as the default; technical defaults (colour space,
+  interactive quality) can be saved too (3:49-4:29).
+- Footage in the demo is dark and practically lit, which makes ghosts and copies read.

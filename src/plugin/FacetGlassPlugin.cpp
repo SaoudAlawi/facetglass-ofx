@@ -17,6 +17,8 @@
 #include <memory>
 #include <functional>
 #include <mutex>
+#include <string>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -37,6 +39,7 @@
 #include "ofxsProcessing.h"
 
 #include "fg3d_cpu.h"
+#include "fg3d_presets.h"
 #ifdef FG_HAVE_CUDA
 #include "fg3d_cuda.h"
 #endif
@@ -81,6 +84,7 @@
 #define P_INNER "innerReflections"
 #define P_GLASSTYPE "glassType"
 #define P_MOUNT "mount"
+#define P_LOOK "look"
 #define P_TINT "tint"
 #define P_TINTD "tintDensity"
 #define P_BEVEL "bevelWidth"
@@ -134,6 +138,37 @@ OfxRectI toPixelEnclosing(const OfxRectD& r, const OfxPointD& rs, double par)
 
 // Which Shape controls matter for each shape (for enabling them in the UI).
 struct ShapeUse { bool facets, both, prism, clear, power, thick, detail, seed, smooth, obj; };
+// Look presets use the renderer's keys (fg3d_presets.cpp); this maps each key to
+// its plugin parameter.
+enum KeyKind { kDbl, kInt, kBool, kChoice, kPoint, kColour };
+struct PresetKey {
+    const char* key;
+    const char* param;
+    KeyKind kind;
+};
+const PresetKey kPresetKeys[] = {
+    { "shape", "shape", kChoice }, { "facets", "facets", kInt }, { "bothSides", "bothSides", kBool },
+    { "prismAngle", "prismAngle", kDbl }, { "clearCentre", "clearCentre", kDbl }, { "power", "diopterPower", kDbl },
+    { "thickness", "thickness", kDbl }, { "detail", "detail", kInt }, { "seed", "seed", kInt },
+    { "center", "center", kPoint }, { "depth", "depth", kDbl }, { "rotX", "tilt", kDbl }, { "rotY", "turn", kDbl },
+    { "rotZ", "roll", kDbl }, { "size", "size", kDbl }, { "ior", "ior", kDbl },
+    { "dispersion", "chromaticAberration", kDbl }, { "reflection", "reflection", kDbl },
+    { "roughness", "roughness", kDbl }, { "innerReflect", "innerReflections", kDbl },
+    { "glassType", "glassType", kChoice }, { "tint", "tint", kColour }, { "tintDensity", "tintDensity", kDbl },
+    { "lensMount", "mount", kChoice }, { "bevelWidth", "bevelWidth", kDbl }, { "bevelAngle", "bevelAngle", kDbl },
+    { "maxBounces", "bounceLimit", kInt }, { "fstop", "fStop", kDbl }, { "focus", "focus", kDbl },
+    { "glassFocus", "glassFocus", kDbl }, { "world", "outsideFrame", kChoice }, { "worldBlur", "worldBlur", kDbl },
+    { "feather", "feather", kDbl }, { "boost", "highlightBoost", kDbl }, { "threshold", "highlightThreshold", kDbl },
+    { "mix", "mix", kDbl },
+};
+
+const PresetKey* presetKeyForParam(const std::string& param)
+{
+    for (const PresetKey& k : kPresetKeys)
+        if (param == k.param) return &k;
+    return nullptr;
+}
+
 ShapeUse shapeUse(int s)
 {
     using namespace fg3d;
@@ -203,6 +238,7 @@ public:
     bool getRegionOfDefinition(const RegionOfDefinitionArguments& args, OfxRectD& rod) override;
     void getRegionsOfInterest(const RegionsOfInterestArguments& args, RegionOfInterestSetter& rois) override;
     void changedParam(const InstanceChangedArgs& args, const std::string& paramName) override;
+    void applyLook(int index);
 
 private:
     void readUI(double t, fg3d::UIParams& ui, bool interactive = false);
@@ -223,7 +259,7 @@ private:
 
     Clip *_dst, *_src, *_refract;
 
-    ChoiceParam *_shape, *_world, *_cspace, *_quality, *_gtype, *_previewQ, *_mount;
+    ChoiceParam *_shape, *_world, *_cspace, *_quality, *_gtype, *_previewQ, *_mount, *_look;
     RGBParam* _tint;
     IntParam *_facets, *_detail, *_seed, *_bounces, *_minS, *_maxS;
     StringParam* _obj;
@@ -296,6 +332,7 @@ FacetGlassPlugin::FacetGlassPlugin(OfxImageEffectHandle handle) : ImageEffect(ha
     _noise = fetchDoubleParam(P_NOISE);
     _center = fetchDouble2DParam(P_CENTER);
     _mount = fetchChoiceParam(P_MOUNT);
+    _look = fetchChoiceParam(P_LOOK);
     for (int i = 0; i < kNumLights; ++i) {
         _lpos[i] = fetchDouble2DParam(kLightPos[i]);
         _ldepth[i] = fetchDoubleParam(kLightDepth[i]);
@@ -325,8 +362,56 @@ void FacetGlassPlugin::updateVisibility()
     _ior->setEnabled(choiceAt(_gtype, 0.0) == fg3d::kGlassCustom);
 }
 
-void FacetGlassPlugin::changedParam(const InstanceChangedArgs&, const std::string& name)
+// Sets every creative control from the base, then the preset's own values.
+void FacetGlassPlugin::applyLook(int index)
 {
+    if (index < 1 || index > fg3d::lookPresetCount()) return;
+    for (const char* list : { fg3d::lookPresetBase(), fg3d::lookPreset(index - 1).args }) {
+        std::string all(list), tok;
+        for (size_t p = 0; p <= all.size(); ++p) {
+            if (p < all.size() && all[p] != ' ') { tok += all[p]; continue; }
+            const size_t eq = tok.find('=');
+            if (eq != std::string::npos) {
+                const std::string key = tok.substr(0, eq);
+                std::vector<double> v;
+                const char* s = tok.c_str() + eq + 1;
+                while (*s) {
+                    char* e = nullptr;
+                    v.push_back(std::strtod(s, &e));
+                    if (e == s) break;
+                    s = (*e == ',') ? e + 1 : e;
+                }
+                for (const PresetKey& k : kPresetKeys) {
+                    if (key != k.key || v.empty()) continue;
+                    switch (k.kind) {
+                    case kDbl: fetchDoubleParam(k.param)->setValue(v[0]); break;
+                    case kInt: fetchIntParam(k.param)->setValue((int)std::lround(v[0])); break;
+                    case kBool: fetchBooleanParam(k.param)->setValue(v[0] != 0.0); break;
+                    case kChoice: fetchChoiceParam(k.param)->setValue((int)std::lround(v[0])); break;
+                    case kPoint: if (v.size() >= 2) fetchDouble2DParam(k.param)->setValue(v[0], v[1]); break;
+                    case kColour: if (v.size() >= 3) fetchRGBParam(k.param)->setValue(v[0], v[1], v[2]); break;
+                    }
+                }
+            }
+            tok.clear();
+        }
+    }
+    updateVisibility();
+}
+
+void FacetGlassPlugin::changedParam(const InstanceChangedArgs& args, const std::string& name)
+{
+    if (args.reason == eChangeUserEdit) {
+        if (name == P_LOOK) {
+            int look = 0;
+            _look->getValue(look);
+            applyLook(look);
+        } else if (presetKeyForParam(name)) {
+            int look = 0;
+            _look->getValue(look);
+            if (look != 0) _look->setValue(0);  // edited by hand: now a custom look
+        }
+    }
     if (name == P_QUALITY || name == P_SHAPE || name == P_GLASSTYPE) updateVisibility();
     if (name == P_OBJ) {
         std::lock_guard<std::mutex> lock(_sceneMutex);
@@ -1091,7 +1176,7 @@ T* finish(T* p, const char* label, const char* hint, GroupParamDescriptor* g)
 {
     p->setLabels(label, label, label);
     p->setHint(hint);
-    p->setParent(*g);
+    if (g) p->setParent(*g);
     if (g_page) g_page->addChild(*p);
     return p;
 }
@@ -1165,6 +1250,15 @@ void FacetGlassFactory::describeInContext(ImageEffectDescriptor& desc, ContextEn
     g_page = desc.definePageParam("Controls");
 
     // ---------------------------------------------------------------- Shape
+    {
+        ChoiceParamDescriptor* lk = desc.defineChoiceParam(P_LOOK);
+        lk->appendOption("Custom");
+        for (int i = 0; i < fg3d::lookPresetCount(); ++i) lk->appendOption(fg3d::lookPreset(i).name);
+        lk->setDefault(0);
+        lk->setAnimates(false);
+        finish(lk, "Look", "Ready-made starting points: pick one, then adjust. Changing any glass setting by hand "
+                           "turns this back to Custom.", nullptr);
+    }
     GroupParamDescriptor* gs = group(desc, "shapeGroup", "Shape");
     {
         ChoiceParamDescriptor* c = desc.defineChoiceParam(P_SHAPE);

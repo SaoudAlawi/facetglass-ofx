@@ -16,6 +16,7 @@
 //              [--time <t>]                      frame number (default 0)
 //              [--negstride]                     store images top-down (negative rowBytes)
 //              [--minimal-host]                  no message suite V2, like DaVinci Resolve
+//              [--look <n>]                      pick Look preset n as a user would (instance changed)
 //              [--interactive]                   mark renders as interactive (viewer), not final
 //              [--metal]                         macOS: images are MTLBuffers, render gets a Metal queue
 //              [name=value | name=x,y ...]       parameter values by script name
@@ -132,6 +133,7 @@ struct Options {
     bool minimalHost = false;  // no message suite V2 (like DaVinci Resolve)
     bool metal = false;        // images as MTLBuffers + Metal render (macOS)
     bool interactive = false;  // renderAction interactive flag
+    int look = -1;             // --look: Look menu index chosen by the "user"
     std::vector<std::pair<std::string, std::vector<double>>> params;
     std::vector<std::pair<std::string, std::string>> strParams;  // name:=text
 };
@@ -554,6 +556,7 @@ static void parseArgs(int argc, char** argv)
         else if (a == "--negstride") { o.negStride = true; }
         else if (a == "--minimal-host") { o.minimalHost = true; }
         else if (a == "--interactive") { o.interactive = true; }
+        else if (a == "--look") { need(1); o.look = std::atoi(argv[++i]); }
         else if (a == "--metal") {
 #ifdef __APPLE__
             o.metal = true;
@@ -641,6 +644,19 @@ int main(int argc, char** argv)
 
     const OfxPointD rs = { o.scale, o.scale };
     const OfxTime t = o.time;
+
+    if (o.look >= 0) {
+        // As if the user picked a Look: set the menu, then send the change.
+        auto* lp = dynamic_cast<ChoiceP*>(inst->getParam("look"));
+        if (!lp) fail("no look parameter");
+        lp->set(o.look);
+        check(inst->beginInstanceChangedAction(kOfxChangeUserEdited), "beginInstanceChanged");
+        check(inst->paramInstanceChangedAction("look", kOfxChangeUserEdited, t, rs), "paramInstanceChanged");
+        check(inst->endInstanceChangedAction(kOfxChangeUserEdited), "endInstanceChanged");
+        int now = -1;
+        lp->get(now);
+        std::printf("look: %d\n", now);
+    }
 
     OfxRectD rod;
     check(inst->getRegionOfDefinitionAction(t, rs, rod), "getRegionOfDefinitionAction");

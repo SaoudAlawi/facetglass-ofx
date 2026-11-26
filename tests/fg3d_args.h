@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "fg3d_presets.h"
 #include "fg3d_scene.h"
 
 namespace fg3d {
@@ -31,6 +32,23 @@ inline bool applyArg(UIParams& ui, double& time, const char* arg)
     if (k == "obj") { ui.shape.objPath = eq + 1; return true; }
     std::vector<double> v = nums(eq + 1);
     if (v.empty()) return false;
+    if (k == "look") {
+        // Look preset (menu index: 1 = first preset): base, then the preset's tokens.
+        const int i = (int)v[0] - 1;
+        if (i < 0 || i >= lookPresetCount()) return false;
+        for (const char* list : { lookPresetBase(), lookPreset(i).args }) {
+            std::string all(list), tok;
+            for (size_t p = 0; p <= all.size(); ++p) {
+                if (p == all.size() || all[p] == ' ') {
+                    if (!tok.empty() && !applyArg(ui, time, tok.c_str())) return false;
+                    tok.clear();
+                } else {
+                    tok += all[p];
+                }
+            }
+        }
+        return true;
+    }
     const double x = v[0];
     if (k == "shape") ui.shape.shape = (int)x;
     else if (k == "facets") ui.shape.facets = (int)x;

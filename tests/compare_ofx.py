@@ -183,6 +183,12 @@ for q in (0, 1):
     ref = run_ref(f"quality{q}", inp, W, H, ref_args(ui, QUALITY[q]))
     out, info = run_host(f"quality{q}", inp, W, H, ofx_args(ui, quality=q))
     report(f"quality preset {q}", out, ref, info)
+# Look presets: picking one in the plugin == the renderer's look=N (several, incl. On Lens).
+for n in (1, 3, 5, 11):
+    ui = dict(BASE)
+    ref = run_ref(f"look{n}", inp, W, H, ref_args(ui, S) + [f"look={n}"])
+    out, info = run_host(f"look{n}", inp, W, H, ofx_args(ui, S), ["--look", str(n)])
+    report(f"look preset {n}", out, ref, info)
 # Preview Quality: interactive renders use Draft, final renders keep Final.
 ui = dict(BASE, **LOOKS["faceted_plate"])
 ref = run_ref("preview_draft", inp, W, H, ref_args(ui, QUALITY[0]))

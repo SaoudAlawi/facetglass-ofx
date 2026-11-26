@@ -39,7 +39,7 @@ if(FG_BUILD_TESTS)
 endif()
 
 # ---------------------------------------------------------------- 3D core (host library)
-add_library(fg3d_host STATIC src/host/fg3d_scene.cpp src/host/fg3d_shapes.cpp)
+add_library(fg3d_host STATIC src/host/fg3d_scene.cpp src/host/fg3d_shapes.cpp src/host/fg3d_presets.cpp)
 target_include_directories(fg3d_host PUBLIC src/core src/host)
 set_target_properties(fg3d_host PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(MSVC)
