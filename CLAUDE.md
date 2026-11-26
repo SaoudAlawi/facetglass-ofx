@@ -67,7 +67,7 @@ The Metal kernel is compute-bound: thread-group shape, BVH stack size and fast m
 
 ## Release
 
-`.github/workflows/build.yml`: macOS (macos-14, universal, Metal tests when the runner has a device) and Windows (windows-2022, CUDA 12.8 via Jimver/cuda-toolkit, CPU tests only: no GPU on hosted runners). Pushing a tag `vX.Y.Z` builds both and publishes a GitHub release with `FacetGlass-macOS.zip` and `FacetGlass-Windows.zip`, using `docs/release-notes/vX.Y.Z.md` as the notes. Bump `kPluginVersionMinor` and the CMake project version first. The macOS bundle is ad-hoc signed, not notarized: users must clear the quarantine flag.
+`.github/workflows/build.yml`: macOS (macos-latest, universal, Metal tests when the runner has a device) and Windows (windows-2022, CUDA 12.8 via Jimver/cuda-toolkit, CPU tests only: no GPU on hosted runners). Pushing a tag `vX.Y.Z` builds both and publishes a GitHub release with `FacetGlass-macOS.zip` and `FacetGlass-Windows.zip`, using `docs/release-notes/vX.Y.Z.md` as the notes. Bump `kPluginVersionMinor` and the CMake project version first. The macOS bundle is ad-hoc signed, not notarized: users must clear the quarantine flag.
 
 ## Next steps (in order)
 
