@@ -54,8 +54,7 @@ kernel void fg_shade(constant FG3DParams& p [[buffer(0)]], device const float* s
 {
     const int x = a.x0 + (int)gid.x, y = a.y0 + (int)gid.y;
     if (x >= a.x1 || y >= a.y1) return;
-    FG3DParams pp = p;
-    fgv4 c = fg3d_shade(&pp, srcPyr, glsPyr, tris, nodesF, nodesI, x, y);
+    fgv4 c = fg3d_shade(&p, srcPyr, glsPyr, tris, nodesF, nodesI, x, y);
     device float* o = dst + a.dstBase + (y - a.dstY1) * a.dstStride + (x - a.dstX1) * 4;
     o[0] = c.x; o[1] = c.y; o[2] = c.z; o[3] = c.w;
 }
@@ -68,9 +67,8 @@ kernel void fg_trace(constant FG3DParams& p [[buffer(0)]], device const float* s
 {
     const int i = (int)gid.x, j = (int)gid.y;
     if (i >= a.rw || j >= a.rh) return;
-    FG3DParams pp = p;
     device float* ax = aux + (j * a.rw + i) * FG_AUX_FLOATS;
-    fg3d_trace(&pp, srcPyr, glsPyr, tris, nodesF, nodesI, a.rx0 + i, a.ry0 + j, ax);
+    fg3d_trace(&p, srcPyr, glsPyr, tris, nodesF, nodesI, a.rx0 + i, a.ry0 + j, ax);
     device float* c = cv + (j * a.rw + i) * FG_CV_FLOATS;
     for (int k = 0; k < FG_CV_FLOATS; ++k) c[k] = ax[k];
 }
@@ -90,9 +88,8 @@ kernel void fg_finish(constant FG3DParams& p [[buffer(0)]], device const float* 
 {
     const int x = a.x0 + (int)gid.x, y = a.y0 + (int)gid.y;
     if (x >= a.x1 || y >= a.y1) return;
-    FG3DParams pp = p;
     device const float* c = cv + ((y - a.ry0) * a.rw + (x - a.rx0)) * FG_CV_FLOATS;
-    fgv4 o = fg3d_finish(&pp, srcPyr, x, y, fgv4m(c[0], c[1], c[2], c[3]));
+    fgv4 o = fg3d_finish(&p, srcPyr, x, y, fgv4m(c[0], c[1], c[2], c[3]));
     device float* d = dst + a.dstBase + (y - a.dstY1) * a.dstStride + (x - a.dstX1) * 4;
     d[0] = o.x; d[1] = o.y; d[2] = o.z; d[3] = o.w;
 }

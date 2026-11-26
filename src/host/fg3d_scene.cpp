@@ -319,6 +319,18 @@ void makeParams(const UIParams& ui, float frameX, float frameY, float frameW, fl
     p.numLights = nl;
     p.numTris = scene.numTris();
     p.numNodes = scene.numNodes();
+    // Bounding sphere of the root BVH box, in world space.
+    p.boundC[0] = p.boundC[1] = p.boundC[2] = 0.0f;
+    p.boundR = 0.0f;
+    if (p.numNodes > 0) {
+        const float* b = scene.nodesF.data();
+        const double c[3] = { 0.5 * (b[0] + b[3]), 0.5 * (b[1] + b[4]), 0.5 * (b[2] + b[5]) };
+        const double h[3] = { 0.5 * (b[3] - b[0]), 0.5 * (b[4] - b[1]), 0.5 * (b[5] - b[2]) };
+        for (int i = 0; i < 3; ++i)
+            p.boundC[i] = (float)(p.objPos[i] + p.objScale * (p.objRot[3 * i] * c[0] + p.objRot[3 * i + 1] * c[1] +
+                                                              p.objRot[3 * i + 2] * c[2]));
+        p.boundR = (float)(p.objScale * std::sqrt(h[0] * h[0] + h[1] * h[1] + h[2] * h[2]));
+    }
 }
 
 }  // namespace fg3d

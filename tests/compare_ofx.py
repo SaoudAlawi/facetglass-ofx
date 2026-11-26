@@ -180,6 +180,11 @@ for q in (0, 1):
     ref = run_ref(f"quality{q}", inp, W, H, ref_args(ui, QUALITY[q]))
     out, info = run_host(f"quality{q}", inp, W, H, ofx_args(ui, quality=q))
     report(f"quality preset {q}", out, ref, info)
+# Preview Quality: interactive renders use Draft, final renders keep Final.
+ui = dict(BASE, **LOOKS["faceted_plate"])
+ref = run_ref("preview_draft", inp, W, H, ref_args(ui, QUALITY[0]))
+out, info = run_host("preview_draft", inp, W, H, ofx_args(ui, quality=2) + ["previewQuality=1"], ["--interactive"])
+report("preview quality (interactive)", out, ref, info)
 
 # 5. Wobble from time, and lights.
 ui = dict(BASE, **LOOKS["gem"], wobble=0.8, wobbleSpeed=1.5)

@@ -16,6 +16,7 @@
 //              [--time <t>]                      frame number (default 0)
 //              [--negstride]                     store images top-down (negative rowBytes)
 //              [--minimal-host]                  no message suite V2, like DaVinci Resolve
+//              [--interactive]                   mark renders as interactive (viewer), not final
 //              [--metal]                         macOS: images are MTLBuffers, render gets a Metal queue
 //              [name=value | name=x,y ...]       parameter values by script name
 //              [name:=text]                      text parameter (e.g. a file path)
@@ -130,6 +131,7 @@ struct Options {
     bool negStride = false;
     bool minimalHost = false;  // no message suite V2 (like DaVinci Resolve)
     bool metal = false;        // images as MTLBuffers + Metal render (macOS)
+    bool interactive = false;  // renderAction interactive flag
     std::vector<std::pair<std::string, std::vector<double>>> params;
     std::vector<std::pair<std::string, std::string>> strParams;  // name:=text
 };
@@ -551,6 +553,7 @@ static void parseArgs(int argc, char** argv)
         else if (a == "--time") { need(1); o.time = std::atof(argv[++i]); }
         else if (a == "--negstride") { o.negStride = true; }
         else if (a == "--minimal-host") { o.minimalHost = true; }
+        else if (a == "--interactive") { o.interactive = true; }
         else if (a == "--metal") {
 #ifdef __APPLE__
             o.metal = true;
@@ -687,7 +690,7 @@ int main(int argc, char** argv)
                     std::printf("roi %s: %g %g %g %g%s\n", r.first->getName().c_str(), r.second.x1, r.second.y1,
                                 r.second.x2, r.second.y2, full ? " (full)" : " (PARTIAL)");
             }
-            check(inst->renderAction(t, kOfxImageFieldNone, win, rs, true, false, false), "renderAction");
+            check(inst->renderAction(t, kOfxImageFieldNone, win, rs, !o.interactive, o.interactive, false), "renderAction");
             ++nTiles;
         }
     }

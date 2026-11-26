@@ -1,5 +1,6 @@
 // FacetGlass 3D - Metal vs CPU test (the macOS twin of fg3d_gpu_test).
-//   fg3d_metal_test <in.raw> <W> <H>
+//   fg3d_metal_test <in.raw> <W> <H> [--bench]
+// --bench: Metal only, full frame, best of 3 (GPU time per look).
 // Renders the same looks on the CPU and with Metal (in 2x2 render windows, one
 // look with a negative-stride source, one with a 2x refract source, all images at
 // a non-zero buffer offset) and compares. The core uses its own exp/log/sin/cos and
@@ -42,6 +43,7 @@ int main(int argc, char** argv)
     @autoreleasepool {
         if (argc < 4) { std::fprintf(stderr, "usage: fg3d_metal_test in.raw W H\n"); return 2; }
         const int W = std::atoi(argv[2]), H = std::atoi(argv[3]);
+        const bool bench = argc > 4 && std::strcmp(argv[4], "--bench") == 0;
         std::vector<float> img((size_t)W * H * 4);
         FILE* f = std::fopen(argv[1], "rb");
         if (!f || std::fread(img.data(), 4, img.size(), f) != img.size()) { std::fprintf(stderr, "bad input\n"); return 2; }
@@ -79,6 +81,25 @@ int main(int argc, char** argv)
             FG3DParams p;
             makeParams(ui, 0, 0, (float)W, (float)H, time, scene, p);
 
+            if (bench) {
+                if (negStride || refract) continue;
+                std::memcpy((float*)bSrc.contents + kPad, img.data(), n * 4);
+                MetalFrame fr;
+                fr.queue = (__bridge void*)queue;
+                fr.src.buffer = (__bridge void*)bSrc; fr.src.base = kPad;
+                fr.src.w = W; fr.src.h = H; fr.src.stride = W * 4;
+                fr.frameW = W; fr.frameH = H;
+                fr.dst = (__bridge void*)bDst; fr.dstBase = kPad; fr.dstStride = W * 4;
+                fr.winX2 = W; fr.winY2 = H; fr.wait = true;
+                double best = 1e30;
+                for (int rep = 0; rep < 3; ++rep) {
+                    auto g0 = std::chrono::steady_clock::now();
+                    if (const char* err = renderMetal(fr, p, scene)) { std::fprintf(stderr, "renderMetal: %s\n", err); return 3; }
+                    best = std::min(best, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g0).count());
+                }
+                std::printf("bench look %d: %.1f ms\n", look, best);
+                continue;
+            }
             auto c0 = std::chrono::steady_clock::now();
             std::vector<float> pyr, gpyr, cpu(n);
             int levels = 0, glevels = 0;

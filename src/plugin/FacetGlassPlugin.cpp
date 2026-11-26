@@ -52,7 +52,7 @@
     "Free and open source (MIT)."
 #define kPluginIdentifier "com.facetglass.FacetGlass"
 #define kPluginVersionMajor 1
-#define kPluginVersionMinor 1
+#define kPluginVersionMinor 2
 
 #define kClipRefract "RefractSource"
 
@@ -99,6 +99,7 @@
 #define P_DENOISE "denoise"
 #define P_CSPACE "inputColorSpace"
 #define P_QUALITY "quality"
+#define P_PREVIEWQ "previewQuality"
 #define P_MINS "minSamples"
 #define P_MAXS "maxSamples"
 #define P_NOISE "noiseThreshold"
@@ -111,6 +112,7 @@ static const char* kLightKelvin[kNumLights] = { "light1Kelvin", "light2Kelvin" }
 static const char* kLightInt[kNumLights] = { "light1Intensity", "light2Intensity" };
 
 enum { kQualityDraft = 0, kQualityGood, kQualityFinal, kQualityCustom };
+enum { kPreviewSame = 0, kPreviewDraft, kPreviewGood };
 
 using namespace OFX;
 
@@ -201,7 +203,7 @@ public:
     void changedParam(const InstanceChangedArgs& args, const std::string& paramName) override;
 
 private:
-    void readUI(double t, fg3d::UIParams& ui);
+    void readUI(double t, fg3d::UIParams& ui, bool interactive = false);
     std::shared_ptr<const fg3d::SceneBuffers> scene(const fg3d::UIParams& ui);
     void updateVisibility();
     // Persistent messages need the host's message suite V2, which not every host
@@ -219,7 +221,7 @@ private:
 
     Clip *_dst, *_src, *_refract;
 
-    ChoiceParam *_shape, *_world, *_cspace, *_quality, *_gtype;
+    ChoiceParam *_shape, *_world, *_cspace, *_quality, *_gtype, *_previewQ;
     RGBParam* _tint;
     IntParam *_facets, *_detail, *_seed, *_bounces, *_minS, *_maxS;
     StringParam* _obj;
@@ -248,6 +250,7 @@ FacetGlassPlugin::FacetGlassPlugin(OfxImageEffectHandle handle) : ImageEffect(ha
     _world = fetchChoiceParam(P_WORLD);
     _cspace = fetchChoiceParam(P_CSPACE);
     _quality = fetchChoiceParam(P_QUALITY);
+    _previewQ = fetchChoiceParam(P_PREVIEWQ);
     _facets = fetchIntParam(P_FACETS);
     _detail = fetchIntParam(P_DETAIL);
     _seed = fetchIntParam(P_SEED);
@@ -328,7 +331,7 @@ void FacetGlassPlugin::changedParam(const InstanceChangedArgs&, const std::strin
     }
 }
 
-void FacetGlassPlugin::readUI(double t, fg3d::UIParams& ui)
+void FacetGlassPlugin::readUI(double t, fg3d::UIParams& ui, bool interactive)
 {
     ui.shape.shape = choiceAt(_shape, t);
     ui.shape.facets = _facets->getValueAtTime(t);
@@ -374,7 +377,12 @@ void FacetGlassPlugin::readUI(double t, fg3d::UIParams& ui)
     ui.colorSpace = choiceAt(_cspace, t);
     bool dragging = false;
     _interacting->getValue(dragging);
-    switch (dragging ? (int)kQualityDraft : choiceAt(_quality, t)) {
+    // Viewer renders may use a lighter Preview Quality; Deliver uses Quality.
+    int quality = choiceAt(_quality, t);
+    const int preview = choiceAt(_previewQ, t);
+    if (interactive && preview == kPreviewDraft) quality = kQualityDraft;
+    if (interactive && preview == kPreviewGood && quality != kQualityDraft) quality = kQualityGood;
+    switch (dragging ? (int)kQualityDraft : quality) {
     case kQualityDraft: ui.minSamples = 4; ui.maxSamples = 8; ui.noiseThreshold = 0.05; break;
     case kQualityGood: ui.minSamples = 16; ui.maxSamples = 64; ui.noiseThreshold = 0.025; break;
     case kQualityFinal: ui.minSamples = 48; ui.maxSamples = 384; ui.noiseThreshold = 0.008; break;
@@ -467,7 +475,7 @@ void FacetGlassPlugin::render(const RenderArguments& args)
     if (gls) gframe = toPixelEnclosing(_refract->getRegionOfDefinition(t), args.renderScale, _refract->getPixelAspectRatio());
 
     fg3d::UIParams ui;
-    readUI(t, ui);
+    readUI(t, ui, args.interactiveRenderStatus);
     std::shared_ptr<const fg3d::SceneBuffers> sc = scene(ui);
     FG3DParams p;
     fg3d::makeParams(ui, (float)frame.x1, (float)frame.y1, (float)fw, (float)fh, t, *sc, p);
@@ -1276,6 +1284,10 @@ void FacetGlassFactory::describeInContext(ImageEffectDescriptor& desc, ContextEn
                  "DaVinci Intermediate" }, FG_CS_REC709);
     ChoiceParamDescriptor* q = choice(desc, P_QUALITY, "Quality", "Rays per pixel (adaptive).", gt,
                                       { "Draft", "Good", "Final", "Custom" }, kQualityGood);
+    choice(desc, P_PREVIEWQ, "Preview Quality",
+           "Quality for interactive viewer renders; Deliver always uses Quality. Set Quality to Final and this "
+           "to Draft or Good for fast previews and clean final renders.", gt,
+           { "Same as Quality", "Draft", "Good" }, kPreviewSame);
     q->setAnimates(false);
     dbl(desc, P_DENOISE, "Denoise",
         "Smooths leftover grain while keeping facet edges and detail (0 = off). Works best with Good or Final.", gt,

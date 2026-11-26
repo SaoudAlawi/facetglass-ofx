@@ -1,0 +1,101 @@
+name: Build
+
+# Builds the plugin for Windows (CUDA + CPU) and macOS (Metal + CPU, universal),
+# runs the CPU exactness tests, and on a version tag (v*) publishes a release
+# with both bundles attached.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Python packages
+        run: pip install numpy pillow scikit-image
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Tests
+        run: |
+          build/fg3d_math_test
+          python tests/fg3d_preview.py build/fg3d_render 320 180
+          python tests/compare_ofx.py build/fg_ofxhost build build/fg3d_render
+          # Hosted runners may not expose a Metal device: run the GPU checks when they can.
+          if build/fg3d_metal_test tests/out/fg3d/in.raw 320 180; then
+            python tests/compare_ofx.py build/fg_ofxhost build build/fg3d_render --metal
+          else
+            echo "::warning::Metal checks skipped or failed on this runner (exit $?)"
+          fi
+      - name: Package
+        run: |
+          codesign --verify build/FacetGlass.ofx.bundle
+          cd build && ditto -c -k --keepParent FacetGlass.ofx.bundle ../FacetGlass-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FacetGlass-macOS
+          path: FacetGlass-macOS.zip
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Python packages
+        run: pip install numpy pillow scikit-image
+      - name: CUDA Toolkit
+        id: cuda
+        uses: Jimver/cuda-toolkit@v0.2.24
+        with:
+          cuda: '12.8.1'
+          method: network
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+      - name: Configure
+        shell: cmd
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -T cuda="%CUDA_PATH%"
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Tests (CPU; hosted runners have no GPU)
+        shell: bash
+        run: |
+          build/Release/fg3d_math_test.exe
+          python tests/fg3d_preview.py build/Release/fg3d_render.exe 320 180
+          python tests/compare_ofx.py build/Release/fg_ofxhost.exe build build/Release/fg3d_render.exe
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path build/FacetGlass.ofx.bundle -DestinationPath FacetGlass-Windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FacetGlass-Windows
+          path: FacetGlass-Windows.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=docs/release-notes/${GITHUB_REF_NAME}.md
+          [ -f "$notes" ] || notes=/dev/null
+          gh release create "$GITHUB_REF_NAME" dist/*.zip --title "FacetGlass ${GITHUB_REF_NAME}" --notes-file "$notes"

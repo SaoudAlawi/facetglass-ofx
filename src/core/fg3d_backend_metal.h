@@ -9,6 +9,7 @@ using namespace metal;
 #define FG_DEVICE static inline
 #define FG_GLOBAL device
 #define FG_PRIV thread
+#define FG_PCONST constant
 #define FG_SQRT precise::sqrt
 #define FG_SIN precise::sin
 #define FG_COS precise::cos

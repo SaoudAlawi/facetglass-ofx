@@ -105,6 +105,11 @@ typedef struct FG3DParams {
      glass, per channel (linear RGB). absorbOn = 0: clear glass. */
   float absorb[3];
   int absorbOn;
+
+  /* World-space bounding sphere of the glass (boundR = 0: unknown). Pixels
+     whose whole lens cone misses it skip tracing when the footage is in focus. */
+  float boundC[3];
+  float boundR;
 } FG3DParams;
 
 #endif

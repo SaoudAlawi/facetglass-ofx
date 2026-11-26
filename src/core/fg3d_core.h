@@ -3,7 +3,8 @@
  * Compiled unchanged as C++ (CPU), CUDA, OpenCL C and Metal. A backend prelude
  * defines, before including this file:
  *   FG_DEVICE  function qualifier        FG_GLOBAL  buffer address space
- *   FG_PRIV    private pointer space     FG_SQRT FG_SIN FG_COS FG_ATAN2 FG_FLOOR
+ *   FG_PRIV    private pointer space     FG_PCONST  parameter block space
+ *                                         FG_SQRT FG_SIN FG_COS FG_ATAN2 FG_FLOOR
  *   FG_FABS FG_FMAX FG_FMIN               float math (exp/log/sin/cos are portable
  *                                         implementations below, for bit-identical backends)
  *
@@ -263,12 +264,28 @@ FG_DEVICE float fg3d_mirror(float u) { float m = u - 2.0f * FG_FLOOR(u * 0.5f); 
 
 /* ------------------------------------------------------------------ geometry */
 
-/* Iterative BVH traversal in object space. Returns triangle index or -1. */
+/* Slab test of one BVH node box; returns the entry distance, or 1e30 on a miss. */
+FG_DEVICE float fg3d_box(FG_GLOBAL const float* nb, fgv3 ro, float ix, float iy, float iz, float tmin, float tBest)
+{
+  float t0x = (nb[0] - ro.x) * ix, t1x = (nb[3] - ro.x) * ix;
+  float t0y = (nb[1] - ro.y) * iy, t1y = (nb[4] - ro.y) * iy;
+  float t0z = (nb[2] - ro.z) * iz, t1z = (nb[5] - ro.z) * iz;
+  float tn = FG_FMAX(FG_FMAX(FG_FMIN(t0x, t1x), FG_FMIN(t0y, t1y)), FG_FMIN(t0z, t1z));
+  float tf = FG_FMIN(FG_FMIN(FG_FMAX(t0x, t1x), FG_FMAX(t0y, t1y)), FG_FMAX(t0z, t1z));
+  if (tf < FG_FMAX(tn, tmin) || tn > tBest) return 1e30f;
+  return tn;
+}
+
+/* Iterative BVH traversal in object space. Returns triangle index or -1.
+   Both child boxes are tested before descending: misses are skipped and the
+   nearer child is visited first, so the closest hit is found early and prunes
+   the rest (entries farther than the best hit so far are dropped on pop). */
 FG_DEVICE int fg3d_intersect(FG_GLOBAL const float* tris, FG_GLOBAL const float* nodesF, FG_GLOBAL const int* nodesI,
                              int numNodes, fgv3 ro, fgv3 rd, float tmin, FG_PRIV float* tHit, FG_PRIV float* uHit,
                              FG_PRIV float* vHit)
 {
   int stack[FG_BVH_STACK];
+  float stackT[FG_BVH_STACK];
   int sp = 0;
   int best = -1;
   float tBest = 1e30f;
@@ -276,16 +293,13 @@ FG_DEVICE int fg3d_intersect(FG_GLOBAL const float* tris, FG_GLOBAL const float*
   float iy = 1.0f / (FG_FABS(rd.y) > 1e-12f ? rd.y : 1e-12f);
   float iz = 1.0f / (FG_FABS(rd.z) > 1e-12f ? rd.z : 1e-12f);
   if (numNodes <= 0) return -1;
-  stack[sp++] = 0;
+  float tr0 = fg3d_box(nodesF, ro, ix, iy, iz, tmin, tBest);
+  if (tr0 >= 1e30f) { *tHit = tBest; return -1; }
+  stack[sp] = 0; stackT[sp] = tr0; sp++;
   while (sp > 0) {
-    int ni = stack[--sp];
-    FG_GLOBAL const float* nb = nodesF + ni * FG_NODE_FLOATS;
-    float t0x = (nb[0] - ro.x) * ix, t1x = (nb[3] - ro.x) * ix;
-    float t0y = (nb[1] - ro.y) * iy, t1y = (nb[4] - ro.y) * iy;
-    float t0z = (nb[2] - ro.z) * iz, t1z = (nb[5] - ro.z) * iz;
-    float tn = FG_FMAX(FG_FMAX(FG_FMIN(t0x, t1x), FG_FMIN(t0y, t1y)), FG_FMIN(t0z, t1z));
-    float tf = FG_FMIN(FG_FMIN(FG_FMAX(t0x, t1x), FG_FMAX(t0y, t1y)), FG_FMAX(t0z, t1z));
-    if (tf < FG_FMAX(tn, tmin) || tn > tBest) continue;
+    --sp;
+    int ni = stack[sp];
+    if (stackT[sp] > tBest) continue;
     int first = nodesI[ni * FG_NODE_INTS];
     int count = nodesI[ni * FG_NODE_INTS + 1];
     if (count > 0) {
@@ -305,9 +319,14 @@ FG_DEVICE int fg3d_intersect(FG_GLOBAL const float* tris, FG_GLOBAL const float*
         float t = fgv_dot(e2, qv) * inv;
         if (t > tmin && t < tBest) { tBest = t; best = k; *uHit = u; *vHit = v; }
       }
-    } else if (sp + 2 <= FG_BVH_STACK) {
-      stack[sp++] = first + 1;
-      stack[sp++] = first;
+    } else {
+      float ta = fg3d_box(nodesF + first * FG_NODE_FLOATS, ro, ix, iy, iz, tmin, tBest);
+      float tb = fg3d_box(nodesF + (first + 1) * FG_NODE_FLOATS, ro, ix, iy, iz, tmin, tBest);
+      int na = first, nb2 = first + 1;
+      if (tb < ta) { float tt = ta; ta = tb; tb = tt; na = first + 1; nb2 = first; }
+      /* Push the farther child first so the nearer one is popped next. */
+      if (tb < 1e30f && sp < FG_BVH_STACK) { stack[sp] = nb2; stackT[sp] = tb; sp++; }
+      if (ta < 1e30f && sp < FG_BVH_STACK) { stack[sp] = na; stackT[sp] = ta; sp++; }
     }
   }
   *tHit = tBest;
@@ -315,13 +334,13 @@ FG_DEVICE int fg3d_intersect(FG_GLOBAL const float* tris, FG_GLOBAL const float*
 }
 
 /* Object <-> world (uniform scale): world = pos + scale * (R p). */
-FG_DEVICE fgv3 fg3d_rot(FG_PRIV const FG3DParams* p, fgv3 a)
+FG_DEVICE fgv3 fg3d_rot(FG_PCONST const FG3DParams* p, fgv3 a)
 {
   return fgv(p->objRot[0] * a.x + p->objRot[1] * a.y + p->objRot[2] * a.z,
              p->objRot[3] * a.x + p->objRot[4] * a.y + p->objRot[5] * a.z,
              p->objRot[6] * a.x + p->objRot[7] * a.y + p->objRot[8] * a.z);
 }
-FG_DEVICE fgv3 fg3d_rotT(FG_PRIV const FG3DParams* p, fgv3 a)
+FG_DEVICE fgv3 fg3d_rotT(FG_PCONST const FG3DParams* p, fgv3 a)
 {
   return fgv(p->objRot[0] * a.x + p->objRot[3] * a.y + p->objRot[6] * a.z,
              p->objRot[1] * a.x + p->objRot[4] * a.y + p->objRot[7] * a.z,
@@ -374,7 +393,7 @@ FG_DEVICE fgv3 fg3d_spectral_weight(float lam)
 }
 
 /* Source or refract-source image at normalised frame position. */
-FG_DEVICE fgv4 fg3d_image(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* src, FG_GLOBAL const float* gls,
+FG_DEVICE fgv4 fg3d_image(FG_PCONST const FG3DParams* p, FG_GLOBAL const float* src, FG_GLOBAL const float* gls,
                           int useGls, float u, float v, float lod)
 {
   if (useGls != 0) return fg3d_lookup(gls, p->glsW, p->glsH, p->glsLevels, u, v, lod);
@@ -382,7 +401,7 @@ FG_DEVICE fgv4 fg3d_image(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* sr
 }
 
 /* What a ray sees once it has left the glass. */
-FG_DEVICE fgv4 fg3d_escape(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* src, FG_GLOBAL const float* gls,
+FG_DEVICE fgv4 fg3d_escape(FG_PCONST const FG3DParams* p, FG_GLOBAL const float* src, FG_GLOBAL const float* gls,
                            fgv3 o, fgv3 d, int glassPath, float aspect, float pixU, float pixV)
 {
   fgv4 c = fgv4m(0.0f, 0.0f, 0.0f, 0.0f);
@@ -449,7 +468,7 @@ FG_DEVICE float fg3d_ign(float x, float y)
 }
 
 /* Highlight boost for light seen via the glass. */
-FG_DEVICE fgv4 fg3d_boost(FG_PRIV const FG3DParams* p, fgv4 c)
+FG_DEVICE fgv4 fg3d_boost(FG_PCONST const FG3DParams* p, fgv4 c)
 {
   float lum = 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
   float e = fg3d_clampf((lum - p->threshold) / FG_FMAX(0.25f * p->threshold, 0.05f), 0.0f, 1.0f);
@@ -462,7 +481,7 @@ FG_DEVICE fgv4 fg3d_boost(FG_PRIV const FG3DParams* p, fgv4 c)
 
 /* Traces one pixel: returns its linear RGBA (before Mix and encoding). When
    `aux` is not null it also writes the denoiser guides (FG_AUX_FLOATS). */
-FG_DEVICE fgv4 fg3d_trace(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* src, FG_GLOBAL const float* gls,
+FG_DEVICE fgv4 fg3d_trace(FG_PCONST const FG3DParams* p, FG_GLOBAL const float* src, FG_GLOBAL const float* gls,
                           FG_GLOBAL const float* tris, FG_GLOBAL const float* nodesF, FG_GLOBAL const int* nodesI,
                           int x, int y, FG_GLOBAL float* aux)
 {
@@ -487,6 +506,32 @@ FG_DEVICE fgv4 fg3d_trace(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* sr
   float o1 = fg3d_ign(bx, by), o2 = fg3d_ign(bx + 5.588238f, by + 5.588238f);
   float o3 = fg3d_ign(bx + 11.176476f, by + 11.176476f), o4 = fg3d_ign(bx + 16.764714f, by + 16.764714f);
   float o5 = fg3d_ign(bx + 22.352952f, by + 22.352952f);
+
+  /* Pixels the glass cannot touch: with the footage in focus, if no ray of the
+     pixel's lens cone (any aperture point, any jitter) can reach the glass's
+     bounding sphere, every sample lands on the footage at this pixel, so it
+     passes through untouched. Conservative: a sample ray at depth z deviates
+     from the pixel's central ray by at most A |1 - z / zf| + 0.7072 z / H. */
+  if (p->boundR > 0.0f && p->focusInv == 1.0f) {
+    float cx = ((fx + 0.5f) / W - 0.5f) * aspect * zf, cy = ((fy + 0.5f) / H - 0.5f) * zf;
+    fgv3 dc = fgv_norm(fgv(cx, cy, zf));
+    fgv3 C = fgv(p->boundC[0], p->boundC[1], p->boundC[2]);
+    float R = p->boundR * 1.01f + 1e-4f;
+    fgv3 perp = fgv_madd(C, dc, -fgv_dot(C, dc));
+    float z0 = FG_FMAX(C.z - R, 0.0f), z1 = C.z + R;
+    float dev0 = p->aperture * FG_FABS(1.0f - z0 / zf) + 0.7072f * z0 / H;
+    float dev1 = p->aperture * FG_FABS(1.0f - z1 / zf) + 0.7072f * z1 / H;
+    float lim = R + FG_FMAX(dev0, dev1);
+    if (fgv_dot(perp, perp) > lim * lim) {
+      fgv4 c0 = fg3d_lookup(src, p->srcW, p->srcH, p->srcLevels, pixU, pixV, 0.0f);
+      if (aux != 0) {
+        aux[0] = c0.x; aux[1] = c0.y; aux[2] = c0.z; aux[3] = c0.w;
+        aux[4] = 0.0f; aux[5] = 0.0f; aux[6] = 0.0f; aux[7] = 0.0f; aux[8] = 0.0f;
+        aux[9] = pixU; aux[10] = pixV; aux[11] = 0.0f;
+      }
+      return c0;
+    }
+  }
 
   float accR = 0.0f, accG = 0.0f, accB = 0.0f, accA = 0.0f;
   float wR = 0.0f, wG = 0.0f, wB = 0.0f;
@@ -743,7 +788,7 @@ FG_DEVICE fgv4 fg3d_trace(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* sr
 
 /* Blends a traced (or denoised) linear colour with the original by Mix and
    encodes it back to the footage's colour space. */
-FG_DEVICE fgv4 fg3d_finish(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* src, int x, int y, fgv4 c)
+FG_DEVICE fgv4 fg3d_finish(FG_PCONST const FG3DParams* p, FG_GLOBAL const float* src, int x, int y, fgv4 c)
 {
   float pixU = ((float)x - p->frameX + 0.5f) / p->frameW, pixV = ((float)y - p->frameY + 0.5f) / p->frameH;
   fgv4 orig = fg3d_lookup(src, p->srcW, p->srcH, p->srcLevels, pixU, pixV, 0.0f);
@@ -754,7 +799,7 @@ FG_DEVICE fgv4 fg3d_finish(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* s
 }
 
 /* Trace + finish (no denoiser). */
-FG_DEVICE fgv4 fg3d_shade(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* src, FG_GLOBAL const float* gls,
+FG_DEVICE fgv4 fg3d_shade(FG_PCONST const FG3DParams* p, FG_GLOBAL const float* src, FG_GLOBAL const float* gls,
                           FG_GLOBAL const float* tris, FG_GLOBAL const float* nodesF, FG_GLOBAL const int* nodesI,
                           int x, int y)
 {

@@ -71,7 +71,9 @@ when you let go.
 
 ## Install (Windows)
 
-1. Build the plugin (below) or take `FacetGlass.ofx.bundle` from a release.
+1. Download `FacetGlass-Windows.zip` from the
+   [latest release](https://github.com/SaoudAlawi/facetglass-ofx/releases/latest),
+   or build the plugin (below).
 2. Copy the bundle to `C:\Program Files\Common Files\OFX\Plugins\` (needs admin),
    or run `powershell -ExecutionPolicy Bypass -File tools\install_windows.ps1`.
 3. Restart DaVinci Resolve. FacetGlass appears under *OpenFX → FacetGlass*.
@@ -82,11 +84,14 @@ usual output transform after FacetGlass); use **Good** quality while working and
 
 ## Install (macOS)
 
-1. Build the plugin (below) or take `FacetGlass.ofx.bundle` from a release.
-   It is one universal bundle for Apple Silicon and Intel Macs, rendering on the
+1. Download `FacetGlass-macOS.zip` from the
+   [latest release](https://github.com/SaoudAlawi/facetglass-ofx/releases/latest),
+   or build the plugin (below). It is one universal bundle for Apple Silicon and Intel Macs, rendering on the
    GPU with Metal.
 2. Copy the bundle to `/Library/OFX/Plugins/` (needs admin), or run
-   `sh tools/install_macos.sh`.
+   `sh tools/install_macos.sh`. For a downloaded bundle, also run
+   `sudo xattr -dr com.apple.quarantine /Library/OFX/Plugins/FacetGlass.ofx.bundle`
+   (the plugin is not notarized yet).
 3. Restart DaVinci Resolve.
 
 ## Build from source

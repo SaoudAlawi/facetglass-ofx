@@ -5,6 +5,7 @@
 #define FG_DEVICE static inline
 #define FG_GLOBAL
 #define FG_PRIV
+#define FG_PCONST
 #define FG_SQRT sqrtf
 #define FG_SIN sinf
 #define FG_COS cosf
