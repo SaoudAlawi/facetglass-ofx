@@ -13,8 +13,12 @@ Free and open source under the MIT licence.
 ## Features
 
 - **Solid 3D glass, path-traced per pixel.** Snell refraction, total internal
-  reflection with a bounce limit, Fresnel reflections, rounded (bevelled) edges,
+  reflection with a bounce limit, Fresnel reflections outside and back inside the
+  glass (faint ghost repeats, adjustable for stronger ghosts), rounded (bevelled) edges,
   rough reflections, continuous spectral dispersion (rainbow edges).
+- Real glass types (crown, flint, dense flint, fused quartz, acrylic, sapphire,
+  cubic zirconia, diamond, water) with their true strength and rainbow spread, and
+  coloured glass whose tint deepens with thickness.
 - **42 shapes** in six groups:
   - *Prisms & filters*: faceted plate (ghost repeats), wedge prism, radial prism
     (multi-image), half radial prism, kaleidoscope, halo ring, ripple rings
@@ -76,7 +80,14 @@ Tips: set **Technical → Input Colour Space** to match your footage (keep your
 usual output transform after FacetGlass); use **Good** quality while working and
 **Final** for delivery; **Denoise** 0.5 is a good default.
 
-macOS (Apple Silicon, Metal) is planned.
+## Install (macOS)
+
+1. Build the plugin (below) or take `FacetGlass.ofx.bundle` from a release.
+   It is one universal bundle for Apple Silicon and Intel Macs, rendering on the
+   GPU with Metal.
+2. Copy the bundle to `/Library/OFX/Plugins/` (needs admin), or run
+   `sh tools/install_macos.sh`.
+3. Restart DaVinci Resolve.
 
 ## Build from source
 
@@ -94,6 +105,18 @@ The plugin is written to `build/FacetGlass.ofx.bundle/Contents/Win64/FacetGlass.
 (static runtimes; it only depends on system DLLs and the NVIDIA driver). Without
 the CUDA Toolkit, configure without `-T cuda=...` to build the CPU-only plugin.
 
+macOS: the Xcode Command Line Tools (`xcode-select --install`) and CMake
+(`brew install cmake`). Full Xcode is not needed: the Metal kernels are compiled
+at run time from the same core source.
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+```
+
+The plugin is written to `build/FacetGlass.ofx.bundle/Contents/MacOS/FacetGlass.ofx`
+(universal arm64 + x86_64, macOS 11+, ad-hoc signed).
+
 ## Tests
 
 ```bat
@@ -104,7 +127,11 @@ python tests/compare_ofx.py build/Release/fg_ofxhost.exe build build/Release/fg3
 python tests/fg3d_noise.py build/Release/fg3d_render.exe
 ```
 
-- `fg3d_gpu_test`: CUDA must match the CPU exactly (including tiles, negative row
+On macOS: `build/fg3d_metal_test tests/out/fg3d/in.raw 480 270` and
+`python3 tests/compare_ofx.py build/fg_ofxhost build build/fg3d_render [--metal]`
+(`--metal` hands the plugin Metal buffers and a command queue, as Resolve does).
+
+- `fg3d_gpu_test` / `fg3d_metal_test`: CUDA / Metal must match the CPU exactly (including tiles, negative row
   strides, a 2x refract source and the denoiser).
 - `compare_ofx.py`: loads the built plugin in a small OpenFX test host
   (`tests/ofxhost`) and checks it against the standalone renderer: shapes, tiles,
@@ -116,14 +143,14 @@ python tests/fg3d_noise.py build/Release/fg3d_render.exe
 ## How it works
 
 - `src/core/fg3d_core.h` is the single source of the shading maths, compiled
-  unchanged for the CPU and CUDA (and later Metal) through a small prelude per
+  unchanged for the CPU, CUDA and Metal through a small prelude per
   backend. It uses its own exp/log/sin/cos and no fused multiply-add, which keeps
   every backend bit-identical.
 - `src/host/` builds the glass: procedural shapes, OBJ import, smoothing, bevel
   data and a BVH; converts the UI values into the render parameters; runs the CPU
-  and CUDA passes (decode to linear, mip pyramid, trace, denoise, encode).
+  CUDA and Metal passes (decode to linear, mip pyramid, trace, denoise, encode).
 - `src/plugin/FacetGlassPlugin.cpp` is the OpenFX plugin: parameters, clips,
-  scene cache, the viewer gizmo, and CUDA or CPU rendering.
+  scene cache, the viewer gizmo, and CUDA, Metal or CPU rendering.
 - `reference/` holds the first (thin-glass) model and a Fusion Fuse, kept as a
   reference.
 

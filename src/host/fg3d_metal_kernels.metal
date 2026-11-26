@@ -1,0 +1,98 @@
+// FacetGlass 3D - Metal backend: the passes of fg3d_core.h as compute kernels.
+// Mirrors fg3d_cuda.cu. At build time CMake inlines the includes into one string
+// (fg3d_metal_src.h) that the host compiles at runtime, so no Xcode is needed.
+// SPDX-License-Identifier: MIT
+#include "fg3d_backend_metal.h"
+
+// Image view: pixel (x1, y1) is at element `base` of the buffer; stride in floats (may be negative).
+typedef struct FGImgArgs {
+    int base, x1, y1, w, h, stride;
+    int fx, fy, fw, fh, cs, pad;
+} FGImgArgs;
+
+typedef struct FGMipArgs { int lw, lh, nw, nh; } FGMipArgs;
+
+// Output window [x0, x1) x [y0, y1); dst pixel (dstX1, dstY1) at element dstBase.
+// Region (rx0, ry0, rw, rh) is the denoiser's padded region.
+typedef struct FGWinArgs {
+    int dstBase, dstX1, dstY1, dstStride;
+    int x0, y0, x1, y1;
+    int rx0, ry0, rw, rh;
+    int step;
+    float sigma, frameH;
+    int pad;
+} FGWinArgs;
+
+kernel void fg_decode(device const float* src [[buffer(0)]], device float* lvl0 [[buffer(1)]],
+                      constant FGImgArgs& a [[buffer(2)]], uint2 gid [[thread_position_in_grid]])
+{
+    const int i = (int)gid.x, j = (int)gid.y;
+    if (i >= a.fw || j >= a.fh) return;
+    int sx = a.fx + i - a.x1, sy = a.fy + j - a.y1;
+    sx = sx < 0 ? 0 : (sx > a.w - 1 ? a.w - 1 : sx);
+    sy = sy < 0 ? 0 : (sy > a.h - 1 ? a.h - 1 : sy);
+    fgv4 c = fg3d_decode_pixel(a.cs, src + a.base + sy * a.stride + sx * 4);
+    device float* o = lvl0 + (j * a.fw + i) * 4;
+    o[0] = c.x; o[1] = c.y; o[2] = c.z; o[3] = c.w;
+}
+
+kernel void fg_mip(device const float* prev [[buffer(0)]], device float* next [[buffer(1)]],
+                   constant FGMipArgs& a [[buffer(2)]], uint2 gid [[thread_position_in_grid]])
+{
+    const int x = (int)gid.x, y = (int)gid.y;
+    if (x >= a.nw || y >= a.nh) return;
+    fgv4 c = fg3d_mip_pixel(prev, a.lw, a.lh, x, y);
+    device float* o = next + (y * a.nw + x) * 4;
+    o[0] = c.x; o[1] = c.y; o[2] = c.z; o[3] = c.w;
+}
+
+kernel void fg_shade(constant FG3DParams& p [[buffer(0)]], device const float* srcPyr [[buffer(1)]],
+                     device const float* glsPyr [[buffer(2)]], device const float* tris [[buffer(3)]],
+                     device const float* nodesF [[buffer(4)]], device const int* nodesI [[buffer(5)]],
+                     device float* dst [[buffer(6)]], constant FGWinArgs& a [[buffer(7)]],
+                     uint2 gid [[thread_position_in_grid]])
+{
+    const int x = a.x0 + (int)gid.x, y = a.y0 + (int)gid.y;
+    if (x >= a.x1 || y >= a.y1) return;
+    FG3DParams pp = p;
+    fgv4 c = fg3d_shade(&pp, srcPyr, glsPyr, tris, nodesF, nodesI, x, y);
+    device float* o = dst + a.dstBase + (y - a.dstY1) * a.dstStride + (x - a.dstX1) * 4;
+    o[0] = c.x; o[1] = c.y; o[2] = c.z; o[3] = c.w;
+}
+
+kernel void fg_trace(constant FG3DParams& p [[buffer(0)]], device const float* srcPyr [[buffer(1)]],
+                     device const float* glsPyr [[buffer(2)]], device const float* tris [[buffer(3)]],
+                     device const float* nodesF [[buffer(4)]], device const int* nodesI [[buffer(5)]],
+                     device float* aux [[buffer(6)]], device float* cv [[buffer(7)]],
+                     constant FGWinArgs& a [[buffer(8)]], uint2 gid [[thread_position_in_grid]])
+{
+    const int i = (int)gid.x, j = (int)gid.y;
+    if (i >= a.rw || j >= a.rh) return;
+    FG3DParams pp = p;
+    device float* ax = aux + (j * a.rw + i) * FG_AUX_FLOATS;
+    fg3d_trace(&pp, srcPyr, glsPyr, tris, nodesF, nodesI, a.rx0 + i, a.ry0 + j, ax);
+    device float* c = cv + (j * a.rw + i) * FG_CV_FLOATS;
+    for (int k = 0; k < FG_CV_FLOATS; ++k) c[k] = ax[k];
+}
+
+kernel void fg_atrous(device const float* aux [[buffer(0)]], device const float* cvIn [[buffer(1)]],
+                      device float* cvOut [[buffer(2)]], constant FGWinArgs& a [[buffer(3)]],
+                      uint2 gid [[thread_position_in_grid]])
+{
+    const int i = (int)gid.x, j = (int)gid.y;
+    if (i >= a.rw || j >= a.rh) return;
+    fg3d_atrous(aux, cvIn, cvOut, a.rw, a.rh, i, j, a.step, a.sigma, a.frameH);
+}
+
+kernel void fg_finish(constant FG3DParams& p [[buffer(0)]], device const float* srcPyr [[buffer(1)]],
+                      device const float* cv [[buffer(2)]], device float* dst [[buffer(3)]],
+                      constant FGWinArgs& a [[buffer(4)]], uint2 gid [[thread_position_in_grid]])
+{
+    const int x = a.x0 + (int)gid.x, y = a.y0 + (int)gid.y;
+    if (x >= a.x1 || y >= a.y1) return;
+    FG3DParams pp = p;
+    device const float* c = cv + ((y - a.ry0) * a.rw + (x - a.rx0)) * FG_CV_FLOATS;
+    fgv4 o = fg3d_finish(&pp, srcPyr, x, y, fgv4m(c[0], c[1], c[2], c[3]));
+    device float* d = dst + a.dstBase + (y - a.dstY1) * a.dstStride + (x - a.dstX1) * 4;
+    d[0] = o.x; d[1] = o.y; d[2] = o.z; d[3] = o.w;
+}

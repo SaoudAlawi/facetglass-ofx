@@ -533,105 +533,160 @@ FG_DEVICE fgv4 fg3d_trace(FG_PRIV const FG3DParams* p, FG_GLOBAL const float* sr
     fgv3 o = fgv(ax, ay, 0.0f);
     fgv3 d = fgv_norm(fgv(px * zf - ax, py * zf - ay, zf));
     int glass = 0;   /* entered the glass at least once */
-    int inside = 0;
     /* Outer reflections are added as weighted environment lookups instead of a
        random reflect/refract choice (which made sparkle noise); the path itself
        always continues by refraction, or total internal reflection. */
     float thr = 1.0f;
+    /* Colour left after absorption inside tinted glass (1 = clear). */
+    float tR = 1.0f, tG = 1.0f, tB = 1.0f;
+    int inside = 0;
     fgv4 add = fgv4m(0.0f, 0.0f, 0.0f, 0.0f);
+    /* Inner reflections: where light leaves the glass, the Fresnel part that
+       reflects back inside is traced too, as a deterministic branch with its own
+       weight (no random choice, so no sparkle noise). Pending branches wait on a
+       small stack; the main path is traced first, then each branch. */
+    float stO[FG_BRANCH_STACK * 3], stD[FG_BRANCH_STACK * 3], stW[FG_BRANCH_STACK], stT[FG_BRANCH_STACK * 3];
+    int stB[FG_BRANCH_STACK];
+    int nst = 0, isMain = 1, b = 0, seg = 0;
+    int segMax = 2 * p->maxBounces;  /* all branches of one sample together */
+    fgv4 c = fgv4m(0.0f, 0.0f, 0.0f, 0.0f);
 
-    for (int b = 0; b < p->maxBounces; b++) {
-      /* Into object space. */
-      fgv3 ro = fg3d_rotT(p, fgv_mul(fgv_sub(o, fgv(p->objPos[0], p->objPos[1], p->objPos[2])), 1.0f / s));
-      fgv3 rd = fg3d_rotT(p, d);
-      float th = 0.0f, uh = 0.0f, vh = 0.0f;
-      int k = fg3d_intersect(tris, nodesF, nodesI, p->numNodes, ro, rd, eps, &th, &uh, &vh);
-      if (k < 0) break;
-      FG_GLOBAL const float* tr = tris + k * FG_TRI_FLOATS;
-      fgv3 hitO = fgv_madd(ro, rd, th);
-      fgv3 ng = fgv_load(tr + 18);
-      fgv3 ns = fg3d_shading_normal(tr, uh, vh, p->bevelWidth / s);
-      if (b == 0) {
-        fgv3 nw = fg3d_rot(p, ns);
-        covN += 1.0f; gnx += nw.x; gny += nw.y; gnz += nw.z;
-      }
-      int entering = fgv_dot(rd, ng) < 0.0f ? 1 : 0;
-      fgv3 nn = entering != 0 ? ns : fgv_mul(ns, -1.0f);      /* faces the incoming ray */
-      fgv3 gn = entering != 0 ? ng : fgv_mul(ng, -1.0f);
-      if (fgv_dot(nn, rd) >= 0.0f) nn = gn;
-      float n1 = entering != 0 ? 1.0f : ior, n2 = entering != 0 ? ior : 1.0f;
-      float cosi = -fgv_dot(rd, nn);
-      float cost = 0.0f;
-      float F = fg3d_fresnel(cosi, n1, n2, &cost);
-      int tir = F >= 1.0f ? 1 : 0;
-      fgv3 nd;
-      fgv3 hitW = fgv_add(fgv(p->objPos[0], p->objPos[1], p->objPos[2]), fgv_mul(fg3d_rot(p, hitO), s));
-      if (tir == 0 && entering != 0) {
-        float fr = fg3d_clampf(F * p->reflect, 0.0f, 1.0f);
-        if (fr > 0.0f) {
-          fgv3 rr = fgv_madd(rd, nn, 2.0f * cosi);
-          if (p->roughness > 0.0f) {
-            float r1 = fg3d_rand(rs ^ (unsigned int)(b * 0x85EBCA6Bu + 3u)) * 2.0f - 1.0f;
-            float r2 = fg3d_rand(rs ^ (unsigned int)(b * 0xC2B2AE35u + 5u)) * 2.0f - 1.0f;
-            float r3 = fg3d_rand(rs ^ (unsigned int)(b * 0x27D4EB2Fu + 7u)) * 2.0f - 1.0f;
-            fgv3 pd = fgv_norm(fgv_add(rr, fgv_mul(fgv(r1, r2, r3), p->roughness)));
-            if (fgv_dot(pd, gn) > 0.0f) rr = pd;
+    for (;;) {
+      for (; b < p->maxBounces && seg < segMax; b++, seg++) {
+        /* Into object space. */
+        fgv3 ro = fg3d_rotT(p, fgv_mul(fgv_sub(o, fgv(p->objPos[0], p->objPos[1], p->objPos[2])), 1.0f / s));
+        fgv3 rd = fg3d_rotT(p, d);
+        float th = 0.0f, uh = 0.0f, vh = 0.0f;
+        int k = fg3d_intersect(tris, nodesF, nodesI, p->numNodes, ro, rd, eps, &th, &uh, &vh);
+        if (k < 0) break;
+        FG_GLOBAL const float* tr = tris + k * FG_TRI_FLOATS;
+        fgv3 hitO = fgv_madd(ro, rd, th);
+        if (inside != 0 && p->absorbOn != 0) {
+          /* Travelled th object units through tinted glass. */
+          tR *= fg3d_exp(-p->absorb[0] * th);
+          tG *= fg3d_exp(-p->absorb[1] * th);
+          tB *= fg3d_exp(-p->absorb[2] * th);
+        }
+        fgv3 ng = fgv_load(tr + 18);
+        fgv3 ns = fg3d_shading_normal(tr, uh, vh, p->bevelWidth / s);
+        if (b == 0 && isMain != 0) {
+          fgv3 nw = fg3d_rot(p, ns);
+          covN += 1.0f; gnx += nw.x; gny += nw.y; gnz += nw.z;
+        }
+        int entering = fgv_dot(rd, ng) < 0.0f ? 1 : 0;
+        fgv3 nn = entering != 0 ? ns : fgv_mul(ns, -1.0f);      /* faces the incoming ray */
+        fgv3 gn = entering != 0 ? ng : fgv_mul(ng, -1.0f);
+        if (fgv_dot(nn, rd) >= 0.0f) nn = gn;
+        float n1 = entering != 0 ? 1.0f : ior, n2 = entering != 0 ? ior : 1.0f;
+        float cosi = -fgv_dot(rd, nn);
+        float cost = 0.0f;
+        float F = fg3d_fresnel(cosi, n1, n2, &cost);
+        int tir = F >= 1.0f ? 1 : 0;
+        fgv3 nd;
+        fgv3 hitW = fgv_add(fgv(p->objPos[0], p->objPos[1], p->objPos[2]), fgv_mul(fg3d_rot(p, hitO), s));
+        if (tir == 0 && entering != 0) {
+          float fr = fg3d_clampf(F * p->reflect, 0.0f, 1.0f);
+          if (fr > 0.0f) {
+            fgv3 rr = fgv_madd(rd, nn, 2.0f * cosi);
+            if (p->roughness > 0.0f) {
+              float r1 = fg3d_rand(rs ^ (unsigned int)(b * 0x85EBCA6Bu + 3u)) * 2.0f - 1.0f;
+              float r2 = fg3d_rand(rs ^ (unsigned int)(b * 0xC2B2AE35u + 5u)) * 2.0f - 1.0f;
+              float r3 = fg3d_rand(rs ^ (unsigned int)(b * 0x27D4EB2Fu + 7u)) * 2.0f - 1.0f;
+              fgv3 pd = fgv_norm(fgv_add(rr, fgv_mul(fgv(r1, r2, r3), p->roughness)));
+              if (fgv_dot(pd, gn) > 0.0f) rr = pd;
+            }
+            if (fgv_dot(rr, gn) <= 0.0f) rr = fgv_madd(rd, gn, -2.0f * fgv_dot(rd, gn));
+            fgv4 rc = fg3d_boost(p, fg3d_escape(p, src, gls, hitW, fg3d_rot(p, fgv_norm(rr)), 1, aspect, pixU, pixV));
+            float wgt = thr * fr;
+            float wr = wgt, wg = wgt, wbl = wgt;
+            if (p->absorbOn != 0) { wr *= tR; wg *= tG; wbl *= tB; }
+            add.x += rc.x * wr; add.y += rc.y * wg; add.z += rc.z * wbl; add.w += rc.w * wgt;
+            thr *= 1.0f - fr;
           }
-          if (fgv_dot(rr, gn) <= 0.0f) rr = fgv_madd(rd, gn, -2.0f * fgv_dot(rd, gn));
-          fgv4 rc = fg3d_boost(p, fg3d_escape(p, src, gls, hitW, fg3d_rot(p, fgv_norm(rr)), 1, aspect, pixU, pixV));
-          float wgt = thr * fr;
-          add.x += rc.x * wgt; add.y += rc.y * wgt; add.z += rc.z * wgt; add.w += rc.w * wgt;
-          thr *= 1.0f - fr;
         }
+        if (tir == 0 && entering == 0 && p->innerReflect > 0.0f) {
+          /* Leaving the glass: the reflected part stays inside as a branch. */
+          float fq = fg3d_clampf(F * p->innerReflect, 0.0f, 1.0f);
+          float wb = thr * fq;
+          float wbc = p->absorbOn != 0 ? wb * FG_FMAX(tR, FG_FMAX(tG, tB)) : wb;
+          if (wbc >= FG_BRANCH_MIN && nst < FG_BRANCH_STACK) {
+            fgv3 rr = fgv_madd(rd, nn, 2.0f * cosi);
+            if (fgv_dot(rr, gn) <= 0.0f) rr = fgv_madd(rd, gn, -2.0f * fgv_dot(rd, gn));
+            fgv3 rw = fg3d_rot(p, fgv_norm(rr));
+            stO[nst * 3] = hitW.x; stO[nst * 3 + 1] = hitW.y; stO[nst * 3 + 2] = hitW.z;
+            stD[nst * 3] = rw.x; stD[nst * 3 + 1] = rw.y; stD[nst * 3 + 2] = rw.z;
+            stW[nst] = wb; stB[nst] = b + 1;
+            stT[nst * 3] = tR; stT[nst * 3 + 1] = tG; stT[nst * 3 + 2] = tB;
+            nst++;
+          }
+          thr *= 1.0f - fq;
+        }
+        if (tir != 0) {
+          nd = fgv_madd(rd, nn, 2.0f * cosi);
+          if (fgv_dot(nd, gn) <= 0.0f) nd = fgv_madd(rd, gn, -2.0f * fgv_dot(rd, gn));
+        } else {
+          float eta = n1 / n2;
+          nd = fgv_add(fgv_mul(rd, eta), fgv_mul(nn, eta * cosi - cost));
+          if (fgv_dot(nd, gn) >= 0.0f) {
+            /* The shading normal sent it the wrong way: refract about the geometric normal. */
+            float cg = -fgv_dot(rd, gn);
+            float s2 = eta * eta * (1.0f - cg * cg);
+            if (s2 < 1.0f) nd = fgv_add(fgv_mul(rd, eta), fgv_mul(gn, eta * cg - FG_SQRT(1.0f - s2)));
+            else nd = fgv_madd(rd, gn, 2.0f * cg);
+          }
+          if (entering != 0) { glass = 1; inside = 1; } else inside = 0;
+        }
+        nd = fgv_norm(nd);
+        /* Back to world space. */
+        o = hitW;
+        d = fg3d_rot(p, nd);
       }
-      int refl = tir;
-      if (refl != 0) {
-        nd = fgv_madd(rd, nn, 2.0f * cosi);
-        if (fgv_dot(nd, gn) <= 0.0f) nd = fgv_madd(rd, gn, -2.0f * fgv_dot(rd, gn));
+
+      fgv4 e;
+      if (isMain != 0) {
+        if (glass != 0 && p->glassFocusInv != p->focusInv && d.z > 1e-6f) {
+          /* Glass focus: shift the landing point by the difference between the two
+             focus distances for this aperture point (a non-physical diopter control). */
+          fgv3 dF = fgv_norm(fgv(px * zf - ax, py * zf - ay, zf));
+          fgv3 dG = fgv_norm(fgv(px * zg - ax, py * zg - ay, zg));
+          float t = (1.0f - o.z) / d.z;
+          float lx = o.x + d.x * t + (ax + dG.x / dG.z) - (ax + dF.x / dF.z);
+          float ly = o.y + d.y * t + (ay + dG.y / dG.z) - (ay + dF.y / dF.z);
+          fgv3 lp = fgv(lx, ly, 1.0f);
+          e = fg3d_escape(p, src, gls, fgv_madd(lp, d, -1e-3f), d, glass, aspect, pixU, pixV);
+        } else {
+          e = fg3d_escape(p, src, gls, o, d, glass, aspect, pixU, pixV);
+        }
+        /* Landing position on the footage plane (denoiser guide; -1 when turned back). */
+        if (d.z > 1e-6f) {
+          float tl = (1.0f - o.z) / d.z;
+          float lu = (o.x + d.x * tl) / aspect + 0.5f, lv = o.y + d.y * tl + 0.5f;
+          luSum += lu; lvSum += lv; luSq += lu * lu; lvSq += lv * lv;
+        } else {
+          luSum -= 1.0f; lvSum -= 1.0f; luSq += 1.0f; lvSq += 1.0f;
+        }
       } else {
-        float eta = n1 / n2;
-        nd = fgv_add(fgv_mul(rd, eta), fgv_mul(nn, eta * cosi - cost));
-        if (fgv_dot(nd, gn) >= 0.0f) {
-          /* The shading normal sent it the wrong way: refract about the geometric normal. */
-          float cg = -fgv_dot(rd, gn);
-          float s2 = eta * eta * (1.0f - cg * cg);
-          if (s2 < 1.0f) nd = fgv_add(fgv_mul(rd, eta), fgv_mul(gn, eta * cg - FG_SQRT(1.0f - s2)));
-          else nd = fgv_madd(rd, gn, 2.0f * cg);
-        }
-        if (entering != 0) { inside = 1; glass = 1; } else inside = 0;
+        e = fg3d_escape(p, src, gls, o, d, 1, aspect, pixU, pixV);
       }
-      nd = fgv_norm(nd);
-      /* Back to world space. */
-      o = hitW;
-      d = fg3d_rot(p, nd);
-    }
+      if (glass != 0) e = fg3d_boost(p, e);
+      {
+        float kr = thr, kg = thr, kb = thr;
+        if (p->absorbOn != 0) { kr *= tR; kg *= tG; kb *= tB; }
+        c.x += e.x * kr; c.y += e.y * kg; c.z += e.z * kb; c.w += e.w * thr;
+      }
 
-    fgv4 c;
-    if (glass != 0 && p->glassFocusInv != p->focusInv && d.z > 1e-6f) {
-      /* Glass focus: shift the landing point by the difference between the two
-         focus distances for this aperture point (a non-physical diopter control). */
-      fgv3 dF = fgv_norm(fgv(px * zf - ax, py * zf - ay, zf));
-      fgv3 dG = fgv_norm(fgv(px * zg - ax, py * zg - ay, zg));
-      float t = (1.0f - o.z) / d.z;
-      float lx = o.x + d.x * t + (ax + dG.x / dG.z) - (ax + dF.x / dF.z);
-      float ly = o.y + d.y * t + (ay + dG.y / dG.z) - (ay + dF.y / dF.z);
-      fgv3 lp = fgv(lx, ly, 1.0f);
-      c = fg3d_escape(p, src, gls, fgv_madd(lp, d, -1e-3f), d, glass, aspect, pixU, pixV);
-    } else {
-      c = fg3d_escape(p, src, gls, o, d, glass, aspect, pixU, pixV);
+      if (nst == 0) break;
+      nst--;
+      o = fgv(stO[nst * 3], stO[nst * 3 + 1], stO[nst * 3 + 2]);
+      d = fgv(stD[nst * 3], stD[nst * 3 + 1], stD[nst * 3 + 2]);
+      thr = stW[nst];
+      tR = stT[nst * 3]; tG = stT[nst * 3 + 1]; tB = stT[nst * 3 + 2];
+      b = stB[nst];
+      glass = 1;
+      inside = 1;
+      isMain = 0;
     }
-
-    /* Landing position on the footage plane (denoiser guide; -1 when turned back). */
-    if (d.z > 1e-6f) {
-      float tl = (1.0f - o.z) / d.z;
-      float lu = (o.x + d.x * tl) / aspect + 0.5f, lv = o.y + d.y * tl + 0.5f;
-      luSum += lu; lvSum += lv; luSq += lu * lu; lvSq += lv * lv;
-    } else {
-      luSum -= 1.0f; lvSum -= 1.0f; luSq += 1.0f; lvSq += 1.0f;
-    }
-
-    if (glass != 0) c = fg3d_boost(p, c);
-    c.x = c.x * thr + add.x; c.y = c.y * thr + add.y; c.z = c.z * thr + add.z; c.w = c.w * thr + add.w;
+    c.x += add.x; c.y += add.y; c.z += add.z; c.w += add.w;
 
     accR += c.x * sw.x; wR += sw.x;
     accG += c.y * sw.y; wG += sw.y;

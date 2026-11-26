@@ -117,6 +117,12 @@ struct SceneBuffers {
 // edges sharper than bevelAngleDeg, and the BVH.
 void buildScene(const Mesh& mesh, float bevelAngleDeg, SceneBuffers& out);
 
+// Glass types (stored in projects: only append).
+enum GlassType {
+    kGlassCustom = 0, kGlassCrown, kGlassFlint, kGlassDenseFlint, kGlassFusedQuartz, kGlassAcrylic, kGlassSapphire,
+    kGlassCubicZirconia, kGlassDiamond, kGlassWater, kGlassTypeCount
+};
+
 // Everything the user controls, in UI units (degrees, f-stops, 0..1 positions).
 struct UIParams {
     ShapeParams shape;
@@ -127,6 +133,10 @@ struct UIParams {
     double ior = 1.5, dispersion = 0.3;
     double fstop = 4.0, focus = 1.0, glassFocus = 1.0;
     double reflection = 1.0, roughness = 0.0;
+    double innerReflect = 1.0;            // reflections back into the glass (0 = off, 1 = physical)
+    int glassType = 0;                    // kGlassCustom uses ior/dispersion as set; others use real glass data
+    double tintR = 1.0, tintG = 1.0, tintB = 1.0;  // colour seen through one object radius (white = clear)
+    double tintDensity = 1.0;             // multiplies the tint's absorption
     double bevelWidth = 0.02, bevelAngle = 20.0;  // width relative to object size
     int maxBounces = 12;
     int minSamples = 16, maxSamples = 64;

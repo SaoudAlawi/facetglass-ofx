@@ -41,6 +41,10 @@
 #define FG_NODE_FLOATS 6
 #define FG_NODE_INTS 2
 #define FG_BVH_STACK 48
+/* Inner reflections: pending reflected branches per sample, and the smallest
+   branch weight worth tracing. */
+#define FG_BRANCH_STACK 4
+#define FG_BRANCH_MIN 0.01f
 
 /* Denoiser buffers (per pixel of the padded render region, tightly packed).
  * Aux: 0..3 linear RGBA, 4 luminance variance of the pixel mean, 5 glass
@@ -93,7 +97,14 @@ typedef struct FG3DParams {
 
   /* Denoiser: edge-stopping strength (0 = off). */
   float denoise;
-  int pad3;
+  /* Partial reflections back into the glass where light leaves it (ghost
+     repeats, gem sparkle): 0 = off, 1 = physical, above 1 = exaggerated. */
+  float innerReflect;
+
+  /* Coloured glass (Beer-Lambert): absorption per object unit of path inside the
+     glass, per channel (linear RGB). absorbOn = 0: clear glass. */
+  float absorb[3];
+  int absorbOn;
 } FG3DParams;
 
 #endif

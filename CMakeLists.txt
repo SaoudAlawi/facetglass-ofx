@@ -1,4 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
+# macOS: one universal plugin for Apple Silicon and Intel Macs.
+if(APPLE)
+  if(NOT DEFINED CMAKE_OSX_ARCHITECTURES)
+    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "macOS architectures")
+  endif()
+  if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
+  endif()
+endif()
 project(FacetGlass VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -8,6 +17,15 @@ option(FG_BUILD_TESTS "Build core equivalence tests" ON)
 option(FG_BUILD_PLUGIN "Build the OpenFX plugin (src/plugin)" ON)
 
 set(OFX_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/openfx)
+
+# Exact maths everywhere: no fused multiply-add contraction (clang contracts by
+# default on arm64), so every backend matches the CPU bit for bit.
+if(NOT MSVC)
+  add_compile_options($<$<COMPILE_LANGUAGE:C,CXX,OBJCXX>:-ffp-contract=off>)
+endif()
+if(APPLE)
+  enable_language(OBJCXX)
+endif()
 
 # ---------------------------------------------------------------- tests
 if(FG_BUILD_TESTS)
@@ -53,7 +71,35 @@ if(FG_ENABLE_CUDA AND NOT APPLE)
   endif()
 endif()
 
+# Metal backend (macOS). The kernels are compiled at runtime from a generated
+# string (core + kernels inlined), so only the Command Line Tools are needed.
+option(FG_ENABLE_METAL "Build the Metal backend on macOS" ON)
+set(FG_HAVE_METAL OFF)
+if(APPLE AND FG_ENABLE_METAL)
+  set(FG_HAVE_METAL ON)
+  set(FG_MSL_OUT ${CMAKE_BINARY_DIR}/generated/fg3d_metal_src.h)
+  add_custom_command(OUTPUT ${FG_MSL_OUT}
+    COMMAND ${CMAKE_COMMAND} -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/src/host/fg3d_metal_kernels.metal
+            -DOUTPUT=${FG_MSL_OUT} "-DINCLUDE_DIRS=${CMAKE_CURRENT_SOURCE_DIR}/src/core|${CMAKE_CURRENT_SOURCE_DIR}/src/host"
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_msl.cmake
+    DEPENDS src/host/fg3d_metal_kernels.metal src/core/fg3d_backend_metal.h src/core/fg3d_core.h
+            src/core/fg3d_params.h cmake/embed_msl.cmake
+    COMMENT "Embedding Metal kernel source" VERBATIM)
+  add_library(fg3d_metal STATIC src/host/fg3d_metal.mm ${FG_MSL_OUT})
+  target_include_directories(fg3d_metal PRIVATE ${CMAKE_BINARY_DIR}/generated)
+  target_link_libraries(fg3d_metal PUBLIC fg3d_host "-framework Metal" "-framework Foundation")
+  target_compile_options(fg3d_metal PRIVATE -fobjc-arc)
+  set_target_properties(fg3d_metal PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  message(STATUS "FacetGlass: Metal backend enabled")
+endif()
+
 if(FG_BUILD_TESTS)
+  if(FG_HAVE_METAL)
+    add_executable(fg3d_metal_test tests/fg3d_metal_test.mm)
+    target_link_libraries(fg3d_metal_test PRIVATE fg3d_metal)
+    target_include_directories(fg3d_metal_test PRIVATE tests)
+    target_compile_options(fg3d_metal_test PRIVATE -fobjc-arc)
+  endif()
   if(FG_HAVE_CUDA)
     add_executable(fg3d_gpu_test tests/fg3d_gpu_test.cpp)
     target_link_libraries(fg3d_gpu_test PRIVATE fg3d_cuda)
@@ -100,7 +146,11 @@ if(FG_BUILD_TESTS AND FG_BUILD_OFXHOST)
   target_link_libraries(fg_ofxhost PRIVATE expat)
   if(MSVC)
     target_compile_definitions(fg_ofxhost PRIVATE _CRT_SECURE_NO_WARNINGS WINDOWS)
-  elseif(UNIX AND NOT APPLE)
+  elseif(APPLE)
+    target_sources(fg_ofxhost PRIVATE tests/ofxhost/fg_ofxhost_metal.mm)
+    set_source_files_properties(tests/ofxhost/fg_ofxhost_metal.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+    target_link_libraries(fg_ofxhost PRIVATE "-framework Metal" "-framework Foundation")
+  elseif(UNIX)
     target_link_libraries(fg_ofxhost PRIVATE dl pthread)
   endif()
 endif()
@@ -123,6 +173,10 @@ if(FG_BUILD_PLUGIN AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/plugin/FacetGlassP
     target_link_libraries(FacetGlass PRIVATE fg3d_cuda CUDA::cudart_static)
     target_compile_definitions(FacetGlass PRIVATE FG_HAVE_CUDA)
   endif()
+  if(FG_HAVE_METAL)
+    target_link_libraries(FacetGlass PRIVATE fg3d_metal)
+    target_compile_definitions(FacetGlass PRIVATE FG_HAVE_METAL)
+  endif()
   set_target_properties(FacetGlass PROPERTIES PREFIX "" SUFFIX ".ofx")
   if(WIN32)
     set(FG_ARCH Win64)
@@ -135,6 +189,13 @@ if(FG_BUILD_PLUGIN AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/plugin/FacetGlassP
   # from appending a Release/ or Debug/ subfolder, which hosts would not find.
   set_target_properties(FacetGlass PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY $<1:${CMAKE_BINARY_DIR}/FacetGlass.ofx.bundle/Contents/${FG_ARCH}>)
+  if(APPLE)
+    # Bundle metadata and an ad-hoc signature (Apple Silicon refuses unsigned code).
+    configure_file(cmake/Info.plist.in ${CMAKE_BINARY_DIR}/FacetGlass.ofx.bundle/Contents/Info.plist @ONLY)
+    add_custom_command(TARGET FacetGlass POST_BUILD
+      COMMAND codesign --force --sign - ${CMAKE_BINARY_DIR}/FacetGlass.ofx.bundle
+      COMMENT "Ad-hoc signing FacetGlass.ofx.bundle" VERBATIM)
+  endif()
   if(MSVC)
     target_compile_definitions(FacetGlass PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)
     target_compile_options(FacetGlass PRIVATE /W3 /fp:precise)

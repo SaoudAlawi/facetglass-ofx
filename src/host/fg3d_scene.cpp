@@ -254,9 +254,36 @@ void makeParams(const UIParams& ui, float frameX, float frameY, float frameW, fl
 
     p.ior = (float)std::max(ui.ior, 1.0);
     p.dispersion = (float)std::max(ui.dispersion, 0.0);
-    p.spectral = ui.dispersion > 0 ? 1 : 0;
+    if (ui.glassType > kGlassCustom && ui.glassType < kGlassTypeCount) {
+        // Real glass: refractive index n_d (587.6 nm) and Abbe number V_d. The core's
+        // index is ior + 0.05 * dispersion * (1/lambda^2 - 1/0.55^2), lambda in um, so
+        // n_F - n_C = 0.05 * dispersion * (1/0.4861^2 - 1/0.6563^2) = (n_d - 1) / V_d.
+        // Chromatic Aberration then scales the real dispersion (0.4 = real).
+        static const double kNd[kGlassTypeCount] = { 0, 1.5168, 1.6200, 1.7847, 1.4585, 1.4917, 1.7682, 2.1500, 2.4175, 1.3330 };
+        static const double kVd[kGlassTypeCount] = { 1, 64.17, 36.37, 25.68, 67.82, 57.40, 72.20, 33.80, 55.30, 55.60 };
+        const double nd = kNd[ui.glassType], vd = kVd[ui.glassType];
+        const double k = 0.05 * (1.0 / (0.4861 * 0.4861) - 1.0 / (0.6563 * 0.6563));
+        const double disp = (nd - 1.0) / (vd * k) * std::max(ui.dispersion, 0.0) / 0.4;
+        // Shift so the index at 587.6 nm is exactly n_d.
+        const double ior = nd + 0.05 * disp * (1.0 / (0.55 * 0.55) - 1.0 / (0.5876 * 0.5876));
+        p.ior = (float)ior;
+        p.dispersion = (float)disp;
+    }
+    p.spectral = p.dispersion > 0 ? 1 : 0;
     p.reflect = (float)std::max(ui.reflection, 0.0);
     p.roughness = (float)std::max(ui.roughness, 0.0);
+    p.innerReflect = (float)std::max(ui.innerReflect, 0.0);
+    // Tint: transmittance `tint` through one object unit (the mesh radius) at density 1.
+    {
+        const double tint[3] = { ui.tintR, ui.tintG, ui.tintB };
+        const double dens = std::max(ui.tintDensity, 0.0);
+        p.absorbOn = 0;
+        for (int c = 0; c < 3; ++c) {
+            const double t = std::min(std::max(tint[c], 1e-3), 1.0);
+            p.absorb[c] = (float)(-std::log(t) * dens);
+            if (p.absorb[c] > 0.0f) p.absorbOn = 1;
+        }
+    }
     p.bevelWidth = (float)(std::max(ui.bevelWidth, 0.0) * p.objScale);
     p.maxBounces = std::max(1, std::min(ui.maxBounces, 256));
     p.minSamples = std::max(1, ui.minSamples);

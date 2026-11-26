@@ -25,6 +25,7 @@
 #include <windows.h>
 #endif
 #ifdef __APPLE__
+#define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl.h>
 #else
 #include <GL/gl.h>
@@ -38,6 +39,9 @@
 #include "fg3d_cpu.h"
 #ifdef FG_HAVE_CUDA
 #include "fg3d_cuda.h"
+#endif
+#ifdef FG_HAVE_METAL
+#include "fg3d_metal.h"
 #endif
 
 #define kPluginName "FacetGlass"
@@ -74,6 +78,10 @@
 #define P_DISP "chromaticAberration"
 #define P_REFL "reflection"
 #define P_ROUGH "roughness"
+#define P_INNER "innerReflections"
+#define P_GLASSTYPE "glassType"
+#define P_TINT "tint"
+#define P_TINTD "tintDensity"
 #define P_BEVEL "bevelWidth"
 #define P_BEVANG "bevelAngle"
 #define P_BOUNCES "bounceLimit"
@@ -211,13 +219,14 @@ private:
 
     Clip *_dst, *_src, *_refract;
 
-    ChoiceParam *_shape, *_world, *_cspace, *_quality;
+    ChoiceParam *_shape, *_world, *_cspace, *_quality, *_gtype;
+    RGBParam* _tint;
     IntParam *_facets, *_detail, *_seed, *_bounces, *_minS, *_maxS;
     StringParam* _obj;
     BooleanParam *_both, *_interacting;
     DoubleParam* _denoise;
     DoubleParam *_prism, *_clear, *_power, *_thick, *_depth, *_tilt, *_turn, *_roll, *_size, *_ior, *_disp, *_refl,
-        *_rough, *_bevel, *_bevAng, *_fstop, *_focus, *_gfocus, *_wblur, *_feather, *_wobble, *_wspeed, *_boost,
+        *_rough, *_inner, *_tintD, *_bevel, *_bevAng, *_fstop, *_focus, *_gfocus, *_wblur, *_feather, *_wobble, *_wspeed, *_boost,
         *_thresh, *_mix, *_noise, *_smooth;
     Double2DParam* _center;
     Double2DParam* _lpos[kNumLights];
@@ -262,6 +271,10 @@ FacetGlassPlugin::FacetGlassPlugin(OfxImageEffectHandle handle) : ImageEffect(ha
     _disp = fetchDoubleParam(P_DISP);
     _refl = fetchDoubleParam(P_REFL);
     _rough = fetchDoubleParam(P_ROUGH);
+    _inner = fetchDoubleParam(P_INNER);
+    _gtype = fetchChoiceParam(P_GLASSTYPE);
+    _tint = fetchRGBParam(P_TINT);
+    _tintD = fetchDoubleParam(P_TINTD);
     _bevel = fetchDoubleParam(P_BEVEL);
     _bevAng = fetchDoubleParam(P_BEVANG);
     _fstop = fetchDoubleParam(P_FSTOP);
@@ -303,11 +316,12 @@ void FacetGlassPlugin::updateVisibility()
     _detail->setEnabled(u.detail);
     _smooth->setEnabled(u.smooth);
     _obj->setEnabled(u.obj);
+    _ior->setEnabled(choiceAt(_gtype, 0.0) == fg3d::kGlassCustom);
 }
 
 void FacetGlassPlugin::changedParam(const InstanceChangedArgs&, const std::string& name)
 {
-    if (name == P_QUALITY || name == P_SHAPE) updateVisibility();
+    if (name == P_QUALITY || name == P_SHAPE || name == P_GLASSTYPE) updateVisibility();
     if (name == P_OBJ) {
         std::lock_guard<std::mutex> lock(_sceneMutex);
         _scene.reset();  // the file may have changed on disk
@@ -338,6 +352,10 @@ void FacetGlassPlugin::readUI(double t, fg3d::UIParams& ui)
     ui.dispersion = _disp->getValueAtTime(t);
     ui.reflection = _refl->getValueAtTime(t);
     ui.roughness = _rough->getValueAtTime(t);
+    ui.innerReflect = _inner->getValueAtTime(t);
+    ui.glassType = choiceAt(_gtype, t);
+    _tint->getValueAtTime(t, ui.tintR, ui.tintG, ui.tintB);
+    ui.tintDensity = _tintD->getValueAtTime(t);
     ui.bevelWidth = _bevel->getValueAtTime(t);
     ui.bevelAngle = _bevAng->getValueAtTime(t);
     ui.maxBounces = _bounces->getValueAtTime(t);
@@ -479,6 +497,38 @@ void FacetGlassPlugin::render(const RenderArguments& args)
         f.winX2 = args.renderWindow.x2; f.winY2 = args.renderWindow.y2;
         if (const char* err = fg3d::renderCUDA(f, p, *sc)) {
             showMessage(std::string("FacetGlass CUDA: ") + err);
+            throwSuiteStatusException(kOfxStatFailed);
+        }
+        return;
+    }
+#endif
+#ifdef FG_HAVE_METAL
+    if (args.isEnabledMetalRender) {
+        // Images are id<MTLBuffer>s whose first float is pixel (bounds.x1, bounds.y1).
+        // A negative rowBytes means rows run bottom-up from the buffer's last row.
+        auto view = [](Image& im, fg3d::MetalImage& v) {
+            const OfxRectI b = im.getBounds();
+            v.buffer = im.getPixelData();
+            v.x1 = b.x1; v.y1 = b.y1; v.w = b.x2 - b.x1; v.h = b.y2 - b.y1;
+            v.stride = im.getRowBytes() / 4;
+            v.base = v.stride < 0 ? (long long)(v.h - 1) * -v.stride : 0;
+        };
+        fg3d::MetalFrame f;
+        f.queue = args.pMetalCmdQ;
+        view(*src, f.src);
+        if (gls) {
+            view(*gls, f.gls);
+            f.glsFrameX = gframe.x1; f.glsFrameY = gframe.y1;
+            f.glsFrameW = gframe.x2 - gframe.x1; f.glsFrameH = gframe.y2 - gframe.y1;
+        }
+        f.frameX = frame.x1; f.frameY = frame.y1; f.frameW = fw; f.frameH = fh;
+        fg3d::MetalImage d;
+        view(*dst, d);
+        f.dst = d.buffer; f.dstBase = d.base; f.dstX1 = d.x1; f.dstY1 = d.y1; f.dstStride = d.stride;
+        f.winX1 = args.renderWindow.x1; f.winY1 = args.renderWindow.y1;
+        f.winX2 = args.renderWindow.x2; f.winY2 = args.renderWindow.y2;
+        if (const char* err = fg3d::renderMetal(f, p, *sc)) {
+            showMessage(std::string("FacetGlass Metal: ") + err);
             throwSuiteStatusException(kOfxStatFailed);
         }
         return;
@@ -1006,6 +1056,9 @@ void FacetGlassFactory::describe(ImageEffectDescriptor& desc)
     desc.setSupportsCudaRender(true);
     desc.setSupportsCudaStream(true);
 #endif
+#ifdef FG_HAVE_METAL
+    desc.setSupportsMetalRender(true);
+#endif
 }
 
 namespace {
@@ -1148,12 +1201,26 @@ void FacetGlassFactory::describeInContext(ImageEffectDescriptor& desc, ContextEn
 
     // ---------------------------------------------------------------- Glass
     GroupParamDescriptor* gg = group(desc, "glassGroup", "Glass");
+    choice(desc, P_GLASSTYPE, "Glass Type",
+           "Real glass sets the strength (IOR) and rainbow spread of that material; Custom uses the sliders.", gg,
+           { "Custom", "Crown Glass", "Flint Glass", "Dense Flint", "Fused Quartz", "Acrylic", "Sapphire",
+             "Cubic Zirconia", "Diamond", "Water" }, 0);
     dbl(desc, P_IOR, "Strength (IOR)", "Index of refraction: how strongly the glass bends light. Viewer: orange arc.", gg, 1.55, 1.0,
         2.5, 1.0, 4.0);
-    dbl(desc, P_DISP, "Chromatic Aberration", "Spectral dispersion: rainbow edges.", gg, 0.4, 0.0, 1.5, 0.0, 5.0);
+    dbl(desc, P_DISP, "Chromatic Aberration",
+        "Spectral dispersion: rainbow edges. With a Glass Type, 0.4 is that material's real dispersion.", gg, 0.4, 0.0, 1.5, 0.0, 5.0);
     dbl(desc, P_REFL, "Reflections", "Strength of reflections off the glass faces (1 = physical).", gg, 1.0, 0.0,
         3.0, 0.0, 20.0);
     dbl(desc, P_ROUGH, "Roughness", "Blurs reflections and spreads highlights.", gg, 0.0, 0.0, 0.5, 0.0, 2.0);
+    dbl(desc, P_INNER, "Inner Reflections",
+        "Light that reflects back into the glass where it leaves: faint ghost repeats and gem sparkle "
+        "(0 = off and fastest, 1 = physical, higher = stronger ghosts). Adds render time.", gg, 1.0, 0.0, 3.0, 0.0, 10.0);
+    {
+        RGBParamDescriptor* t = desc.defineRGBParam(P_TINT);
+        t->setDefault(1.0, 1.0, 1.0);
+        finish(t, "Tint", "Colour of the glass, as seen through about half its width. White = clear.", gg);
+    }
+    dbl(desc, P_TINTD, "Tint Density", "How strongly the tint deepens with thickness.", gg, 1.0, 0.0, 5.0, 0.0, 50.0);
     dbl(desc, P_BEVEL, "Bevel Width", "Rounded edges that catch the light (fraction of the object size).", gg, 0.02,
         0.0, 0.15, 0.0, 1.0);
     dbl(desc, P_BEVANG, "Bevel Angle Limit", "Only edges sharper than this angle (degrees) get a bevel.", gg, 20.0,

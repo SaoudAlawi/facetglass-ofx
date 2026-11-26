@@ -4,7 +4,8 @@ exactly, and handle tiles, render scale, negative row bytes, the Refract Source
 clip, quality presets, wobble from time, lights, colour spaces and identity.
 
 Usage:
-  python tests/compare_ofx.py <fg_ofxhost> <plugin dir> <fg3d_render>
+  python tests/compare_ofx.py <fg_ofxhost> <plugin dir> <fg3d_render> [--metal]
+--metal (macOS) runs every render through the plugin's Metal path, as Resolve does.
 The plugin dir is the folder containing FacetGlass.ofx.bundle.
 Exit code 0 = pass.
 """
@@ -19,6 +20,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "reference", "kernel-harness"))
 import run  # test image
 
 host, plugdir, render = (os.path.abspath(a) for a in sys.argv[1:4])
+HOST_EXTRA = [a for a in sys.argv[4:] if a == "--metal"]
 OUT = os.path.join(HERE, "out", "ofx3d")
 os.makedirs(OUT, exist_ok=True)
 W, H = 480, 270
@@ -31,7 +33,7 @@ MAP = dict(shape=("shape", "shape"), facets=("facets", "facets"), bothSides=("bo
            seed=("seed", "seed"), center=("center", "center"), depth=("depth", "depth"), rotX=("rotX", "tilt"),
            rotY=("rotY", "turn"), rotZ=("rotZ", "roll"), size=("size", "size"), ior=("ior", "ior"),
            dispersion=("dispersion", "chromaticAberration"), reflection=("reflection", "reflection"),
-           roughness=("roughness", "roughness"), bevelWidth=("bevelWidth", "bevelWidth"),
+           roughness=("roughness", "roughness"), innerReflect=("innerReflect", "innerReflections"), glassType=("glassType", "glassType"), tint=("tint", "tint"), tintDensity=("tintDensity", "tintDensity"), bevelWidth=("bevelWidth", "bevelWidth"),
            bevelAngle=("bevelAngle", "bevelAngle"), maxBounces=("maxBounces", "bounceLimit"),
            fstop=("fstop", "fStop"), focus=("focus", "focus"), glassFocus=("glassFocus", "glassFocus"),
            world=("world", "outsideFrame"), worldBlur=("worldBlur", "worldBlur"), feather=("feather", "feather"),
@@ -40,7 +42,7 @@ MAP = dict(shape=("shape", "shape"), facets=("facets", "facets"), bothSides=("bo
            colorSpace=("colorSpace", "inputColorSpace"), denoise=("denoise", "denoise"))
 BASE = dict(shape=15, facets=3, bothSides=0, prismAngle=6.0, clearCentre=0.4, power=4.0, thickness=0.3, detail=1,
             seed=1, center=(0.5, 0.5), depth=0.15, rotX=0.0, rotY=0.0, rotZ=0.0, size=0.7, ior=1.55,
-            dispersion=0.4, reflection=1.0, roughness=0.0, bevelWidth=0.02, bevelAngle=20.0, maxBounces=12,
+            dispersion=0.4, reflection=1.0, roughness=0.0, innerReflect=1.0, glassType=0, tint=(1.0, 1.0, 1.0), tintDensity=1.0, bevelWidth=0.02, bevelAngle=20.0, maxBounces=12,
             fstop=4.0, focus=1.0, glassFocus=1.0, world=0, worldBlur=4.0, feather=0.05, wobble=0.0,
             wobbleSpeed=1.0, boost=0.5, threshold=1.0, mix=1.0, colorSpace=0, denoise=0.0)
 SAMPLES = dict(minSamples=8, maxSamples=24, noise=0.03)
@@ -56,6 +58,12 @@ LOOKS = {
                             focus=0.05, fstop=5.6),
     "box_slog3": dict(shape=23, size=0.6, depth=0.25, rotX=25, rotY=35, focus=0.0, fstop=8, colorSpace=3),
     "sphere_transparent": dict(shape=27, detail=2, size=0.8, depth=0.2, world=5, worldBlur=2.0),
+    "ghost_plate": dict(shape=0, facets=3, bothSides=1, size=0.9, depth=0.12, rotZ=12, innerReflect=3.0),
+    "gem_no_inner": dict(rotX=-35, rotY=15, ior=2.0, focus=0.05, fstop=5.6, innerReflect=0.0),
+    "diamond_amber": dict(rotX=-35, rotY=15, focus=0.05, fstop=5.6, glassType=8, tint=(1.0, 0.72, 0.35),
+                          tintDensity=1.5),
+    "emerald_crystals": dict(shape=21, facets=7, size=1.2, center=(0.3, 0.4), seed=3, glassType=2,
+                             tint=(0.3, 0.85, 0.5), dispersion=1.0),
     "gem_denoised": dict(rotX=-35, rotY=15, ior=2.0, focus=0.05, fstop=5.6, denoise=0.5),
     "crystals_denoised": dict(shape=21, facets=7, size=1.2, center=(0.3, 0.4), fstop=2.0, dispersion=0.7, seed=3,
                               denoise=1.0),
@@ -105,7 +113,7 @@ def run_ref(name, inp, w, h, args):
 
 def run_host(name, inp, w, h, args, extra=()):
     o = os.path.join(OUT, name + ".raw")
-    r = subprocess.run([host, "--plugins", plugdir, "--in", inp, str(w), str(h), "--out", o] + list(extra) + args,
+    r = subprocess.run([host, "--plugins", plugdir, "--in", inp, str(w), str(h), "--out", o] + HOST_EXTRA + list(extra) + args,
                        capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stdout, r.stderr)

@@ -21,11 +21,13 @@
 using namespace fg3d;
 
 static const char* kLooks[][8] = {
-    { "shape=0", "facets=3", "prismAngle=6", "size=0.9", "depth=0.12", "center=0.42,0.5", "rotZ=8", nullptr },
+    { "shape=0", "facets=3", "prismAngle=6", "size=0.9", "depth=0.12", "center=0.42,0.5", "rotZ=8", "innerReflect=3" },
     { "shape=2", "facets=6", "prismAngle=7", "clearCentre=0.5", "size=1.6", "depth=0.15", nullptr },
     { "shape=10", "power=6", "size=0.7", "depth=0.2", "center=0.5,0.6", "dispersion=0.6", nullptr },
     { "shape=15", "size=0.7", "depth=0.15", "rotX=-35", "rotY=15", "ior=2.0", "focus=0.05", "light=0.2,0.8,0.3,0.1,6500,3" },
     { "shape=21", "facets=7", "size=1.2", "depth=0.15", "center=0.3,0.4", "ior=1.7", "seed=3", "roughness=0.2" },
+    { "shape=15", "size=0.7", "depth=0.15", "rotX=-35", "rotY=15", "ior=2.0", "focus=0.05", "innerReflect=0" },
+    { "shape=15", "size=0.7", "depth=0.15", "rotX=-35", "glassType=8", "tint=1,0.7,0.35", "tintDensity=1.5", "innerReflect=2" },
     { "shape=23", "size=0.6", "depth=0.25", "rotX=25", "rotY=35", "focus=0", "fstop=8", "colorSpace=3" },
     { "shape=27", "detail=2", "size=0.8", "depth=0.2", "world=5", "wobble=0.7", "time=31", nullptr },
     { "shape=11", "power=4", "size=2.5", "depth=0.15", "rotZ=180", "focus=0.5", "glassFocus=1", "fstop=2" },

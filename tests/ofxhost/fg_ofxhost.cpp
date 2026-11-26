@@ -16,6 +16,7 @@
 //              [--time <t>]                      frame number (default 0)
 //              [--negstride]                     store images top-down (negative rowBytes)
 //              [--minimal-host]                  no message suite V2, like DaVinci Resolve
+//              [--metal]                         macOS: images are MTLBuffers, render gets a Metal queue
 //              [name=value | name=x,y ...]       parameter values by script name
 //              [name:=text]                      text parameter (e.g. a file path)
 //
@@ -45,6 +46,14 @@
 // HostSupport headers depend on each other: keep this order (same as hostDemo).
 #include "ofxhBinary.h"
 #include "ofxhPropertySuite.h"
+#include "ofxGPURender.h"
+
+#ifdef __APPLE__
+extern "C" void* fgmQueue();
+extern "C" void* fgmWrap(const void* data, size_t bytes);
+extern "C" void fgmReadBack(void* buf, void* data, size_t bytes);
+extern "C" void fgmRelease(void* buf);
+#endif
 #include "ofxhClip.h"
 #include "ofxhParam.h"
 #include "ofxhMemory.h"
@@ -80,6 +89,7 @@ struct Buffer {
     int w = 0, h = 0;
     bool negStride = false;
     std::vector<float> mem;
+    void* mtl = nullptr;  // --metal: id<MTLBuffer> holding a copy of mem
 
     void alloc(int W, int H, bool neg)
     {
@@ -119,6 +129,7 @@ struct Options {
     double time = 0.0;
     bool negStride = false;
     bool minimalHost = false;  // no message suite V2 (like DaVinci Resolve)
+    bool metal = false;        // images as MTLBuffers + Metal render (macOS)
     std::vector<std::pair<std::string, std::vector<double>>> params;
     std::vector<std::pair<std::string, std::string>> strParams;  // name:=text
 };
@@ -132,7 +143,7 @@ static Buffer g_src, g_ref, g_out;
 class TestImage : public OH::ImageEffect::Image {
 public:
     TestImage(OH::ImageEffect::ClipInstance& clip, Buffer& b, double scale)
-        : OH::ImageEffect::Image(clip, scale, scale, b.base(), OfxRectI{ 0, 0, b.w, b.h },
+        : OH::ImageEffect::Image(clip, scale, scale, b.mtl ? b.mtl : b.base(), OfxRectI{ 0, 0, b.w, b.h },
                                  OfxRectI{ 0, 0, b.w, b.h }, b.rowBytes(), kOfxImageFieldNone, "fgtest")
     {
     }
@@ -267,6 +278,15 @@ public:
     OfxStatus set(OfxTime, double x, double y) override { return set(x, y); }
 };
 
+class RGBP : public ValueParam<OH::Param::RGBInstance> {
+public:
+    RGBP(OH::Param::Descriptor& d, OH::Param::SetInstance* s) : ValueParam(d, s, 3, true) {}
+    OfxStatus get(double& r, double& g, double& b) override { r = _v[0]; g = _v[1]; b = _v[2]; return kOfxStatOK; }
+    OfxStatus get(OfxTime, double& r, double& g, double& b) override { return get(r, g, b); }
+    OfxStatus set(double r, double g, double b) override { _v[0] = r; _v[1] = g; _v[2] = b; return kOfxStatOK; }
+    OfxStatus set(OfxTime, double r, double g, double b) override { return set(r, g, b); }
+};
+
 class StringP : public OH::Param::StringInstance {
 public:
     StringP(OH::Param::Descriptor& d, OH::Param::SetInstance* s)
@@ -318,6 +338,20 @@ public:
     double getFrameRecursive() const override { return g_opt.time; }
     void getRenderScaleRecursive(double& x, double& y) const override { x = y = g_opt.scale; }
 
+#ifdef __APPLE__
+    // --metal: render in Metal mode on our queue, as Resolve does.
+    void setCustomInArgs(const std::string& action, OFX::Host::Property::Set& inArgs) override
+    {
+        if (!g_opt.metal || action != kOfxImageEffectActionRender) return;
+        static const OFX::Host::Property::PropSpec en = { kOfxImageEffectPropMetalEnabled, OFX::Host::Property::eInt, 1, false, "1" };
+        static const OFX::Host::Property::PropSpec q = { kOfxImageEffectPropMetalCommandQueue, OFX::Host::Property::ePointer, 1, false, "0" };
+        inArgs.createProperty(en);
+        inArgs.createProperty(q);
+        inArgs.setIntProperty(kOfxImageEffectPropMetalEnabled, 1);
+        inArgs.setPointerProperty(kOfxImageEffectPropMetalCommandQueue, fgmQueue());
+    }
+#endif
+
     OH::Param::Instance* newParam(const std::string&, OH::Param::Descriptor& d) override
     {
         const std::string& t = d.getType();
@@ -326,6 +360,7 @@ public:
         if (t == kOfxParamTypeBoolean) return new BoolP(d, this);
         if (t == kOfxParamTypeChoice) return new ChoiceP(d, this);
         if (t == kOfxParamTypeDouble2D) return new Double2DP(d, this);
+        if (t == kOfxParamTypeRGB) return new RGBP(d, this);
         if (t == kOfxParamTypeString) return new StringP(d, this);
         if (t == kOfxParamTypeGroup) return new OH::Param::GroupInstance(d, this);
         if (t == kOfxParamTypePage) return new OH::Param::PageInstance(d, this);
@@ -516,6 +551,13 @@ static void parseArgs(int argc, char** argv)
         else if (a == "--time") { need(1); o.time = std::atof(argv[++i]); }
         else if (a == "--negstride") { o.negStride = true; }
         else if (a == "--minimal-host") { o.minimalHost = true; }
+        else if (a == "--metal") {
+#ifdef __APPLE__
+            o.metal = true;
+#else
+            fail("--metal needs macOS");
+#endif
+        }
         else if (a.find(":=") != std::string::npos) {
             const size_t eq = a.find(":=");
             o.strParams.emplace_back(a.substr(0, eq), a.substr(eq + 2));
@@ -544,6 +586,10 @@ static void setParam(OH::ImageEffect::Instance& inst, const std::string& name, c
         if (v.size() < 2) fail(name + " needs x,y");
         st = q->set(v[0], v[1]);
     }
+    else if (auto* q = dynamic_cast<RGBP*>(p)) {
+        if (v.size() < 3) fail(name + " needs r,g,b");
+        st = q->set(v[0], v[1], v[2]);
+    }
     if (st != kOfxStatOK) fail("cannot set " + name);
 }
 
@@ -556,6 +602,13 @@ int main(int argc, char** argv)
     if (!o.refPath.empty()) g_ref.load(o.refPath, o.refW, o.refH, o.negStride);
     g_out.alloc(o.inW, o.inH, o.negStride);
     std::fill(g_out.mem.begin(), g_out.mem.end(), -1.0f); // unwritten pixels are easy to spot
+#ifdef __APPLE__
+    if (o.metal) {
+        for (Buffer* b : { &g_src, &g_ref, &g_out })
+            if (b->w > 0) b->mtl = fgmWrap(b->mem.data(), b->mem.size() * sizeof(float));
+        std::printf("metal: on\n");
+    }
+#endif
 
     IsolatedPluginCache::install(o.pluginDir);
     OH::PluginCache* cache = OH::PluginCache::getPluginCache();
@@ -642,6 +695,12 @@ int main(int argc, char** argv)
     std::printf("roi_full: %d\n", roiFull ? 1 : 0);
 
     check(inst->endRenderAction(t, t, 1.0, false, rs, true, false), "endRenderAction");
+#ifdef __APPLE__
+    if (o.metal) {
+        fgmReadBack(g_out.mtl, g_out.mem.data(), g_out.mem.size() * sizeof(float));
+        for (Buffer* b : { &g_src, &g_ref, &g_out }) { fgmRelease(b->mtl); b->mtl = nullptr; }
+    }
+#endif
 
     size_t unwritten = 0;
     for (size_t i = 0; i < g_out.mem.size(); i += 4)
