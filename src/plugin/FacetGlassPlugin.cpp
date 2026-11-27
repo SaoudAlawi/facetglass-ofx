@@ -57,7 +57,7 @@
     "Free and open source (MIT)."
 #define kPluginIdentifier "com.facetglass.FacetGlass"
 #define kPluginVersionMajor 1
-#define kPluginVersionMinor 2
+#define kPluginVersionMinor 3
 
 #define kClipRefract "RefractSource"
 
